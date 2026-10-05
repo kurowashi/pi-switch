@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "disabled": {
+    "packages": ["npm:pi-exa"],
+    "skills": ["pdf"]
+  },
+  "enabled": {
+    "tools": ["exa_search"]
+  }
+}

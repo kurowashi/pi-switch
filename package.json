@@ -1,0 +1,40 @@
+{
+	"name": "pi-scope",
+	"version": "0.1.0",
+	"description": "Toggle Pi tools, skills, and package resources per user or project scope from one TUI",
+	"keywords": ["pi-package", "pi", "scope", "tools", "skills", "packages", "toggle"],
+	"license": "MIT",
+	"type": "module",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"pi": {
+		"extensions": ["./src/index.ts"]
+	},
+	"files": ["src"],
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
+	},
+	"peerDependenciesMeta": {
+		"@earendil-works/pi-coding-agent": { "optional": true },
+		"@earendil-works/pi-tui": { "optional": true }
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.14",
+		"@earendil-works/pi-coding-agent": "1.0.3",
+		"@earendil-works/pi-tui": "1.0.3",
+		"@types/node": "^24.0.0",
+		"knip": "6.39.0",
+		"lefthook": "2.1.14",
+		"typescript": "7.0.2"
+	},
+	"scripts": {
+		"check": "biome check . && tsc --noEmit",
+		"fix": "biome check --write .",
+		"knip": "knip --no-config-hints",
+		"test": "node --test \"test/**/*.test.ts\"",
+		"test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=85 --test-coverage-branches=80 --test-coverage-functions=80 \"test/unit/**/*.test.ts\" \"test/integration/**/*.test.ts\"",
+		"verify": "npm run check && npm run knip && npm test && npm run test:coverage"
+	}
+}
