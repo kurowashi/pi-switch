@@ -512,6 +512,8 @@ test("filtering narrows rows, backspace edits, and escape clears then closes", a
 			assert.match(picker.render(120).join("\n"), /beta/);
 			picker.handleInput?.("\u0015");
 			assert.match(picker.render(120).join("\n"), /alpha/);
+			picker.handleInput?.("\u0085");
+			assert.match(picker.render(120).join("\n"), /type to search/, "a C1 control must not enter the filter");
 			picker.handleInput?.("a");
 			picker.handleInput?.("\x1b");
 			assert.equal(harness.closed(), false, "the first escape clears the filter");
