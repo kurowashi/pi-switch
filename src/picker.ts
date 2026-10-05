@@ -1,9 +1,9 @@
 /**
- * The pi-switch picker: one searchable list of packages, tools, and skills with
- * a live toggle for the active scope.
+ * The pi-switch picker: one searchable list of packages, tools, skills, and
+ * prompt sections with a live toggle for the active scope.
  *
  * The component is written by hand instead of using `SelectList` or
- * `SettingsList` because rows mix three kinds, carry per-scope state badges,
+ * `SettingsList` because rows mix four kinds, carry per-scope state badges,
  * and toggling writes files. Tests drive `createScopePicker` directly; `/switch`
  * wraps it in `ctx.ui.custom`. See README.md#コマンド for the keys.
  */
@@ -100,6 +100,13 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 			"Skills",
 			catalog.items
 				.filter((item) => item.kind === "skill" && matchesItem(item, query))
+				.map((item) => ({ type: "item" as const, item })),
+		);
+		appendSection(
+			rows,
+			"Sections",
+			catalog.items
+				.filter((item) => item.kind === "section" && matchesItem(item, query))
 				.map((item) => ({ type: "item" as const, item })),
 		);
 		return { rows, selectable: rows.flatMap((row, index) => (row.type === "section" ? [] : [index])) };

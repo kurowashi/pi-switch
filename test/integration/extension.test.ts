@@ -12,8 +12,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import type { SystemMessage } from "@earendil-works/pi-ai";
 import type {
 	BeforeAgentStartEvent,
+	ContextWithSystemEvent,
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionContext,
@@ -65,7 +67,7 @@ interface Harness {
 	notifications: Notification[];
 	active: string[];
 	setActiveCalls: string[][];
-	emit(event: string, data: unknown): Promise<void>;
+	emit(event: string, data: unknown): Promise<unknown>;
 	runCommand(args?: string): Promise<void>;
 	openPicker(): Promise<Component>;
 	closed(): boolean;
@@ -115,6 +117,16 @@ function beforeAgentStart(skills: Skill[]): BeforeAgentStartEvent {
 		systemPrompt: "",
 		systemPromptOptions: { skills },
 	} as unknown as BeforeAgentStartEvent;
+}
+
+function contextWithSystem(sections: Record<string, string>): ContextWithSystemEvent {
+	return {
+		type: "context_with_system",
+		messages: [
+			{ role: "system", content: "", sections, timestamp: 1 },
+			{ role: "user", content: "hi", timestamp: 2 },
+		],
+	} as unknown as ContextWithSystemEvent;
 }
 
 function createHarness(options: HarnessOptions): Harness {
@@ -175,7 +187,9 @@ function createHarness(options: HarnessOptions): Harness {
 		},
 		setActiveCalls,
 		async emit(event: string, data: unknown) {
-			for (const handler of handlers.get(event) ?? []) await handler(data, ctx);
+			let result: unknown;
+			for (const handler of handlers.get(event) ?? []) result = await handler(data, ctx);
+			return result;
 		},
 		async runCommand(args = "") {
 			const command = commands.get(COMMAND_NAME);
@@ -560,6 +574,107 @@ test("a malformed user config is warned about once and is never overwritten", as
 			picker.handleInput?.(" ");
 			assert.equal(readFileSync(userConfig(agentDir), "utf8"), "{ nope");
 			assert.match(harness.notifications.at(-1)?.message ?? "", /refusing to edit/);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("context_with_system removes disabled sections and keeps the rest of the request", async () => {
+	await withAgentDirectory(async (agentDir) => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			writeJson(userConfig(agentDir), { version: 1, sections: { disabled: ["docs"] } });
+			const harness = createHarness({ cwd });
+			await harness.emit("session_start", { type: "session_start", reason: "startup" });
+			const result = (await harness.emit(
+				"context_with_system",
+				contextWithSystem({ preamble: "P", docs: "D", rules: "R" }),
+			)) as { messages: SystemMessage[] } | undefined;
+			assert.ok(result !== undefined);
+			assert.equal(result.messages.length, 2, "exactly one system head plus the conversation");
+			assert.equal(result.messages[0]?.role, "system");
+			assert.deepEqual(result.messages[0]?.sections, { preamble: "P", rules: "R" });
+			assert.deepEqual(result.messages[1], { role: "user", content: "hi", timestamp: 2 });
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("context_with_system leaves the request alone when no section is disabled", async () => {
+	await withAgentDirectory(async () => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			const harness = createHarness({ cwd });
+			const result = await harness.emit("context_with_system", contextWithSystem({ preamble: "P" }));
+			assert.equal(result, undefined, "an unchanged request must not be rebuilt");
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("a project section disable applies only when the project is trusted", async () => {
+	await withAgentDirectory(async () => {
+		const trustedCwd = temporaryDirectory("pi-switch-trusted-");
+		const untrustedCwd = temporaryDirectory("pi-switch-untrusted-");
+		try {
+			writeJson(projectConfig(trustedCwd), { version: 1, sections: { disabled: ["docs"] } });
+			writeJson(projectConfig(untrustedCwd), { version: 1, sections: { disabled: ["docs"] } });
+
+			const trusted = createHarness({ cwd: trustedCwd, trusted: true });
+			await trusted.emit("session_start", { type: "session_start", reason: "startup" });
+			assert.notEqual(
+				await trusted.emit("context_with_system", contextWithSystem({ docs: "D", rules: "R" })),
+				undefined,
+			);
+
+			const untrusted = createHarness({ cwd: untrustedCwd, trusted: false });
+			await untrusted.emit("session_start", { type: "session_start", reason: "startup" });
+			assert.equal(
+				await untrusted.emit("context_with_system", contextWithSystem({ docs: "D", rules: "R" })),
+				undefined,
+			);
+		} finally {
+			rmSync(trustedCwd, { recursive: true, force: true });
+			rmSync(untrustedCwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("the picker lists sections and writes them to the top-level key", async () => {
+	await withAgentDirectory(async (agentDir) => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			const harness = createHarness({ cwd });
+			await harness.runCommand();
+			const picker = await harness.openPicker();
+			assert.match(picker.render(120).join("\n"), /Sections/);
+			assert.match(picker.render(120).join("\n"), /docs/);
+			picker.handleInput?.("docs");
+			picker.handleInput?.(" ");
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 1, sections: { disabled: ["docs"] } });
+			assert.match(picker.render(120).join("\n"), /○ docs/);
+			assert.deepEqual(harness.setActiveCalls, [], "sections need no tool re-application");
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("a section observed in a request appears in the picker catalog", async () => {
+	await withAgentDirectory(async () => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			const harness = createHarness({ cwd });
+			await harness.runCommand();
+			const before = await harness.openPicker();
+			assert.doesNotMatch(before.render(120).join("\n"), /knowledge_index/);
+			await harness.emit("context_with_system", contextWithSystem({ knowledge_index: "K" }));
+			const picker = await harness.openPicker();
+			picker.handleInput?.("knowledge_index");
+			assert.match(picker.render(120).join("\n"), /knowledge_index/);
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}

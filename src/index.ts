@@ -1,13 +1,15 @@
 /**
- * pi-switch: enable or disable tools, skills, and whole packages per user or
- * project scope.
+ * pi-switch: enable or disable tools, skills, packages, and prompt sections
+ * per user or project scope.
  *
  * The two config files are the only state. Changes apply in place: tools
  * through `pi.setActiveTools`, skills through the `before_agent_start` prompt
- * options. `/switch` opens the picker. See README.md for the user-facing
- * description and DESIGN.md for why unloading is out of scope.
+ * options, and prompt sections per request through `context_with_system`.
+ * `/switch` opens the picker. See README.md for the user-facing description
+ * and DESIGN.md for why unloading is out of scope.
  */
 
+import { getCurrentSystemMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
@@ -25,7 +27,7 @@ import {
 	writeConfigFile,
 } from "./config.ts";
 import { runScopePicker, type ScopeInfo, type ScopePickerDeps } from "./picker.ts";
-import { activeToolNames, collectCatalog, filterSkills } from "./resources.ts";
+import { activeToolNames, BUILTIN_SECTIONS, collectCatalog, filterPromptSections, filterSkills } from "./resources.ts";
 
 export const COMMAND_NAME = "switch";
 
@@ -36,6 +38,8 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 	let resolved: ResolvedConfig = resolveConfig(userFile.config, undefined);
 	let baseline: string[] | undefined;
 	const warned = new Set<string>();
+	/** Section names seen in a request. The picker also lists #{@link BUILTIN_SECTIONS}. */
+	const observedSections = new Set<string>();
 
 	function reload(ctx: ExtensionContext): void {
 		userFile = readConfigFile(userConfigPath(agentDir));
@@ -111,9 +115,13 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 		return [{ name: "user", available: true }, project];
 	}
 
+	function sectionNames(): string[] {
+		return [...new Set([...BUILTIN_SECTIONS, ...observedSections])].sort();
+	}
+
 	function dependencies(ctx: ExtensionCommandContext): ScopePickerDeps {
 		return {
-			catalog: () => collectCatalog(pi.getAllTools(), ctx.getSystemPromptOptions().skills ?? []),
+			catalog: () => collectCatalog(pi.getAllTools(), ctx.getSystemPromptOptions().skills ?? [], sectionNames()),
 			resolved: () => resolved,
 			scopes,
 			layerState: (scope: ScopeName, target: ToggleTarget) =>
@@ -135,8 +143,21 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 		event.systemPromptOptions.skills = filterSkills(event.systemPromptOptions.skills, resolved);
 	});
 
+	// Sections are removed per request, after every extension has contributed its own.
+	// The transcript keeps them, so disabling never touches compaction or reloads.
+	pi.on("context_with_system", (event) => {
+		const current = getCurrentSystemMessage(event.messages);
+		if (current === undefined) return undefined;
+		for (const name of Object.keys(current.sections ?? {})) observedSections.add(name);
+		const head = filterPromptSections(current, resolved);
+		if (head === undefined) return undefined;
+		// Rebuilding collapses mid-conversation system messages into the replayed head,
+		// the same way Pi does for providers without mid-conversation support.
+		return { messages: [head, ...event.messages.filter((message) => message.role !== "system")] };
+	});
+
 	pi.registerCommand(COMMAND_NAME, {
-		description: "Enable or disable tools, skills, and packages per user or project scope",
+		description: "Enable or disable tools, skills, packages, and prompt sections per user or project scope",
 		handler: async (args, ctx) => {
 			if (args.trim() !== "") {
 				ctx.ui.notify(`pi-switch: /${COMMAND_NAME} takes no arguments`, "warning");

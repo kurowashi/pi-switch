@@ -18,7 +18,7 @@
 |---|---|---|
 | モデル向けのツールを登録しない | `test/contract/surface.test.ts` | `src/index.ts` |
 | コマンドは `switch` の1つだけ | `test/contract/surface.test.ts` | `test/contract/surface.test.ts` の `EXPECTED_COMMANDS`、`src/index.ts` |
-| イベントは `session_start` / `before_agent_start` の2種で、各1ハンドラ | `test/contract/surface.test.ts` | `EXPECTED_EVENTS`、`src/index.ts` |
+| イベントは `session_start` / `before_agent_start` / `context_with_system` の3種で、各1ハンドラ | `test/contract/surface.test.ts` | `EXPECTED_EVENTS`、`src/index.ts` |
 | TUI 以外のモードではピッカーを開かずエラーを通知する | `test/integration/extension.test.ts` | `src/index.ts` の command ハンドラ |
 
 ### 設定ファイル
@@ -27,6 +27,8 @@
 |---|---|---|
 | パスは user `<agent dir>/pi-switch.json`、project `<cwd>/.pi/pi-switch.json` | `test/unit/config.test.ts` | `src/config.ts` の `userConfigPath` / `projectConfigPath` |
 | 適用順は user.disabled → user.enabled → project.disabled → project.enabled。未記載は有効 | `test/unit/config.test.ts` | `src/config.ts` の `resolveConfig` |
+| プロンプトセクションはトップレベル `sections` キーだけに置き、`disabled` / `enabled` マップには置かない | `test/unit/config.test.ts` | `src/config.ts` の `parseSections` / `parseLists` |
+| `sections` の欠落は空として読む | `test/unit/config.test.ts` | `src/config.ts` の `parseSections` |
 | パッケージ指定は由来するツールとスキルすべてに効く | `test/unit/resources.test.ts` | `src/resources.ts` の `itemTarget` / `itemDisabled` |
 | npm の source は版を除いて正規化する(`npm:pi-exa@1.2.3` → `npm:pi-exa`) | `test/unit/resources.test.ts` | `src/resources.ts` の `packageKeyFromSource` |
 | リストはソートと重複除去で正規化する | `test/unit/config.test.ts` | `src/config.ts` の `normalizeList` |
@@ -47,6 +49,10 @@
 | カタログに無いツール名はそのまま残す | `test/unit/resources.test.ts` | `src/resources.ts` の `activeToolNames` |
 | `exposure: "hidden"` のツールは一覧に出さない | `test/unit/resources.test.ts` | `src/resources.ts` の `collectCatalog` |
 | スキルは `before_agent_start` の `systemPromptOptions.skills` をフィルタする | `test/integration/extension.test.ts` | `src/index.ts` の before_agent_start ハンドラ |
+| 無効なセクションはリクエスト先頭の system message から除去する | `test/unit/resources.test.ts` + `test/integration/extension.test.ts` | `src/resources.ts` の `filterPromptSections`、`src/index.ts` |
+| 無効対象が無ければリクエストを再構築しない | `test/unit/resources.test.ts` | `src/resources.ts` の `filterPromptSections` |
+| フィルタ後も先頭 system message の `content` / `toolsAdded` を保持する | `test/unit/resources.test.ts` + `test/integration/extension.test.ts` | `src/resources.ts` の `filterPromptSections` |
+| 一覧はビルトイン ∪ 観測済みセクション名 | `test/unit/resources.test.ts` | `src/resources.ts` の `BUILTIN_SECTIONS`、`src/index.ts` の `observedSections` |
 | ツールの適用は session_start とトグル時のみ(毎ターン再主張しない) | `test/integration/extension.test.ts` | `src/index.ts` の `applyTools` の呼び出し箇所 |
 | 有効集合が変わらないとき `setActiveTools` を呼ばない | `test/integration/extension.test.ts` | `src/index.ts` の `applyTools` |
 | トグルは書き込みの前に両ファイルを読み直し、外部編集を保持する | `test/integration/extension.test.ts` | `src/index.ts` の `toggle` |
@@ -57,7 +63,7 @@
 
 | 制約 | 検証 | 定義・実装箇所 |
 |---|---|---|
-| 行は Packages → Tools → Skills の順で、空のセクションを出さない | `test/integration/extension.test.ts` | `src/picker.ts` の `view` / `appendSection` |
+| 行は Packages → Tools → Skills → Sections の順で、空のセクションを出さない | `test/integration/extension.test.ts` | `src/picker.ts` の `view` / `appendSection` |
 | 絞り込みは名前・パッケージ名・説明に一致する | `test/integration/extension.test.ts` | `src/picker.ts` の `matchesItem` |
 | パッケージ行は実効状態が `on` 以外のとき有効化、`on` のとき無効化する | `test/integration/extension.test.ts` | `src/picker.ts` の `toggleSelected` |
 | 未信頼の Project スコープではトグルせず理由を通知する | `test/integration/extension.test.ts` | `src/picker.ts` の `toggleSelected` |
@@ -119,3 +125,5 @@
 4. Global と Project の状態がそれぞれのファイルに保存され、再起動後も維持されること。
 5. 未信頼のプロジェクトで Project ファイルが読まれず、書き込みが拒否されること。
 6. 壊れた設定ファイルを置いても設定が空になるだけで、ファイルが破壊されないこと。
+7. `/switch` の Sections で `docs` を無効にし、次のターンのシステムプロンプトから `<docs>` が消え、セッションファイルには残ること。有効に戻すと復帰すること。
+8. 未信頼のプロジェクトで Project ファイルのセクション設定が読まれず、書き込みが拒否されること。

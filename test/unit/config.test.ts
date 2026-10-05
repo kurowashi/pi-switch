@@ -42,8 +42,8 @@ test("an empty object is a valid config with version 1", () => {
 	const parsed = parseConfig("{}");
 	assert.ok(parsed.ok);
 	assert.equal(parsed.config.version, 1);
-	assert.deepEqual(parsed.config.disabled, { tools: [], skills: [], packages: [] });
-	assert.deepEqual(parsed.config.enabled, { tools: [], skills: [], packages: [] });
+	assert.deepEqual(parsed.config.disabled, { tools: [], skills: [], packages: [], sections: [] });
+	assert.deepEqual(parsed.config.enabled, { tools: [], skills: [], packages: [], sections: [] });
 	assert.deepEqual(parsed.config.extra, {});
 });
 
@@ -73,6 +73,49 @@ test("invalid configs are rejected with a reason", () => {
 	assert.equal(parseConfig('{"disabled":{"tools":[1]}}').ok, false);
 	assert.equal(parseConfig('{"disabled":{"tols":[]}}').ok, false);
 	assert.equal(parseConfig('{"disabled":{"tools":[""]}}').ok, false);
+	assert.equal(parseConfig('{"disabled":{"sections":["docs"]}}').ok, false, "sections belong at the top level");
+	assert.equal(parseConfig('{"enabled":{"nope":[]}}').ok, false);
+	assert.equal(parseConfig('{"sections":[]}').ok, false);
+	assert.equal(parseConfig('{"sections":{"disabled":"docs"}}').ok, false);
+	assert.equal(parseConfig('{"sections":{"unknown":[]}}').ok, false);
+});
+
+test("prompt sections live in the top-level sections key", () => {
+	const parsed = parseConfig('{"sections":{"disabled":["docs","b","a","docs"],"enabled":["rules"]}}');
+	assert.ok(parsed.ok);
+	assert.deepEqual(parsed.config.disabled.sections, ["a", "b", "docs"]);
+	assert.deepEqual(parsed.config.enabled.sections, ["rules"]);
+	const serialized = JSON.parse(serializeConfig(parsed.config)) as Record<string, unknown>;
+	assert.deepEqual(serialized["sections"], { disabled: ["a", "b", "docs"], enabled: ["rules"] });
+	assert.equal(serialized["disabled"], undefined, "sections must not leak into the disabled map");
+	assert.equal(serialized["enabled"], undefined);
+});
+
+test("a file without a sections key stays valid (older versions)", () => {
+	const parsed = parseConfig('{"version":1,"disabled":{"tools":["a"]}}');
+	assert.ok(parsed.ok);
+	assert.deepEqual(parsed.config.disabled.sections, []);
+	assert.deepEqual(parsed.config.enabled.sections, []);
+});
+
+test("sections round-trip through the file and the unknown fields survive", () => {
+	const directory = sandbox();
+	try {
+		const file = readConfigFile(join(directory, CONFIG_FILE_NAME));
+		setDisabled(file.config, "sections", "docs", true);
+		file.config.extra["note"] = "keep me";
+		writeConfigFile(file);
+
+		const serialized = JSON.parse(readFileSync(file.path, "utf8")) as Record<string, unknown>;
+		assert.deepEqual(serialized["sections"], { disabled: ["docs"] });
+		assert.equal(serialized["note"], "keep me");
+
+		const reread = readConfigFile(file.path);
+		assert.equal(reread.malformed, false);
+		assert.deepEqual(reread.config.disabled.sections, ["docs"]);
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
 });
 
 test("a missing file is empty and a broken file is malformed", () => {
@@ -87,6 +130,9 @@ test("a missing file is empty and a broken file is malformed", () => {
 		const broken = readConfigFile(brokenPath);
 		assert.equal(broken.malformed, true);
 		assert.deepEqual(broken.config, emptyConfig());
+
+		const unreadable = readConfigFile(directory);
+		assert.equal(unreadable.malformed, true, "an unreadable path is malformed, not fatal");
 
 		assert.throws(() => writeConfigFile(broken), /malformed/);
 		assert.equal(readFileSync(brokenPath, "utf8"), "{ nope", "the broken file must not be touched");
@@ -115,7 +161,7 @@ test("writeConfigFile creates the directory, replaces the file atomically, and r
 
 		const reread = readConfigFile(file.path);
 		assert.equal(reread.malformed, false);
-		assert.deepEqual(reread.config.disabled, { tools: ["exa_request"], skills: ["pdf"], packages: [] });
+		assert.deepEqual(reread.config.disabled, { tools: ["exa_request"], skills: ["pdf"], packages: [], sections: [] });
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}
@@ -138,6 +184,14 @@ test("unlisted targets stay enabled and each layer can override the previous", (
 	assert.equal(resolveConfig(user, undefined).isDisabled({ kind: "skills", name: "s", packageName: "npm:pkg" }), true);
 	assert.equal(resolveConfig(user, project).isDisabled({ kind: "skills", name: "s", packageName: "npm:pkg" }), false);
 	assert.equal(resolveConfig(user, project).isDisabled({ kind: "packages", name: "npm:pkg" }), false);
+});
+
+test("sections resolve through the same layers as other targets", () => {
+	const user = config('{"sections":{"disabled":["docs"]}}');
+	const project = config('{"sections":{"enabled":["docs"]}}');
+	assert.equal(resolveConfig(user, undefined).isDisabled({ kind: "sections", name: "docs" }), true);
+	assert.equal(resolveConfig(user, undefined).isDisabled({ kind: "sections", name: "rules" }), false);
+	assert.equal(resolveConfig(user, project).isDisabled({ kind: "sections", name: "docs" }), false);
 });
 
 test("an enable override inside one layer beats that layer's package disable", () => {

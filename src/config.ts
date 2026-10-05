@@ -7,7 +7,9 @@
  * A target is disabled when a layer disables it and no later layer enables it.
  * Layers apply in order, user then project, and inside a layer the enabled list
  * wins over the disabled list. Targets that no list mentions stay enabled.
- * See README.md#設定 for the user-facing description.
+ * Prompt sections live in the top-level `sections` key instead of the
+ * `disabled` / `enabled` maps, so older versions keep the file valid as an
+ * unknown top-level field. See README.md#設定 for the user-facing description.
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -17,10 +19,14 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 export const CONFIG_FILE_NAME = "pi-switch.json";
 const CONFIG_VERSION = 1;
 
-export type ResourceKind = "tools" | "skills" | "packages";
+export type ResourceKind = "tools" | "skills" | "packages" | "sections";
 export type ScopeName = "user" | "project";
 
-const RESOURCE_KINDS: readonly ResourceKind[] = ["tools", "skills", "packages"];
+/** Kinds stored inside the `disabled` / `enabled` maps; sections have their own key. */
+type DiskKind = Exclude<ResourceKind, "sections">;
+
+const DISK_KINDS: readonly DiskKind[] = ["tools", "skills", "packages"];
+const RESOURCE_KINDS: readonly ResourceKind[] = [...DISK_KINDS, "sections"];
 
 /** A tool, a skill, or a whole package. */
 export interface ToggleTarget {
@@ -37,6 +43,11 @@ export interface ScopeConfig extends Lists {
 	version: number;
 	/** Unknown top-level fields, preserved when the file is rewritten. */
 	extra: Record<string, unknown>;
+}
+
+interface SectionLists {
+	disabled: string[];
+	enabled: string[];
 }
 
 export interface ScopeFile {
@@ -65,8 +76,8 @@ export function projectConfigPath(cwd: string): string {
 export function emptyConfig(): ScopeConfig {
 	return {
 		version: CONFIG_VERSION,
-		disabled: { tools: [], skills: [], packages: [] },
-		enabled: { tools: [], skills: [], packages: [] },
+		disabled: { tools: [], skills: [], packages: [], sections: [] },
+		enabled: { tools: [], skills: [], packages: [], sections: [] },
 		extra: {},
 	};
 }
@@ -86,7 +97,19 @@ export function parseConfig(text: string): ParseResult {
 	if (enabled === undefined) {
 		return { ok: false, error: "enabled must map tools, skills, and packages to arrays of names" };
 	}
-	return { ok: true, config: { version, disabled, enabled, extra: extraFields(root.record) } };
+	const sections = parseSections(root.record["sections"]);
+	if (sections === undefined) {
+		return { ok: false, error: "sections must map disabled and enabled to arrays of names" };
+	}
+	return {
+		ok: true,
+		config: {
+			version,
+			disabled: { ...disabled, sections: sections.disabled },
+			enabled: { ...enabled, sections: sections.enabled },
+			extra: extraFields(root.record),
+		},
+	};
 }
 
 function parseRoot(text: string): { ok: true; record: Record<string, unknown> } | { ok: false; error: string } {
@@ -105,7 +128,7 @@ function parseRoot(text: string): { ok: true; record: Record<string, unknown> } 
 function extraFields(record: Record<string, unknown>): Record<string, unknown> {
 	const extra: Record<string, unknown> = {};
 	for (const [key, entry] of Object.entries(record)) {
-		if (key === "version" || key === "disabled" || key === "enabled") continue;
+		if (key === "version" || key === "disabled" || key === "enabled" || key === "sections") continue;
 		extra[key] = entry;
 	}
 	return extra;
@@ -131,6 +154,8 @@ export function serializeConfig(config: ScopeConfig): string {
 	if (Object.keys(disabled).length > 0) output["disabled"] = disabled;
 	const enabled = compactLists(config.enabled);
 	if (Object.keys(enabled).length > 0) output["enabled"] = enabled;
+	const sections = compactSections(config.disabled.sections, config.enabled.sections);
+	if (sections !== undefined) output["sections"] = sections;
 	for (const [key, value] of Object.entries(config.extra)) output[key] = value;
 	return `${JSON.stringify(output, undefined, 2)}\n`;
 }
@@ -220,20 +245,34 @@ function toSets(config: ScopeConfig): LayerSets {
 	};
 }
 
-function parseLists(value: unknown): Record<ResourceKind, string[]> | undefined {
+function parseLists(value: unknown): Record<DiskKind, string[]> | undefined {
 	if (value === undefined) return { tools: [], skills: [], packages: [] };
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
 	const record = value as Record<string, unknown>;
 	for (const key of Object.keys(record)) {
 		if (key !== "tools" && key !== "skills" && key !== "packages") return undefined;
 	}
-	const lists: Record<ResourceKind, string[]> = { tools: [], skills: [], packages: [] };
-	for (const kind of RESOURCE_KINDS) {
+	const lists: Record<DiskKind, string[]> = { tools: [], skills: [], packages: [] };
+	for (const kind of DISK_KINDS) {
 		const parsed = parseNameList(record[kind]);
 		if (parsed === undefined) return undefined;
 		lists[kind] = parsed;
 	}
 	return lists;
+}
+
+/** The top-level `sections` key: `disabled` and `enabled` lists of section names. */
+function parseSections(value: unknown): SectionLists | undefined {
+	if (value === undefined) return { disabled: [], enabled: [] };
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const record = value as Record<string, unknown>;
+	for (const key of Object.keys(record)) {
+		if (key !== "disabled" && key !== "enabled") return undefined;
+	}
+	const disabled = parseNameList(record["disabled"]);
+	const enabled = parseNameList(record["enabled"]);
+	if (disabled === undefined || enabled === undefined) return undefined;
+	return { disabled, enabled };
 }
 
 function parseNameList(value: unknown): string[] | undefined {
@@ -249,10 +288,23 @@ function parseNameList(value: unknown): string[] | undefined {
 
 function compactLists(lists: Record<ResourceKind, string[]>): Record<string, string[]> {
 	const result: Record<string, string[]> = {};
-	for (const kind of RESOURCE_KINDS) {
+	for (const kind of DISK_KINDS) {
 		const names = normalizeList(lists[kind]);
 		if (names.length > 0) result[kind] = names;
 	}
+	return result;
+}
+
+function compactSections(
+	disabled: readonly string[],
+	enabled: readonly string[],
+): Record<string, string[]> | undefined {
+	const result: Record<string, string[]> = {};
+	const off = normalizeList(disabled);
+	const on = normalizeList(enabled);
+	if (off.length > 0) result["disabled"] = off;
+	if (on.length > 0) result["enabled"] = on;
+	if (Object.keys(result).length === 0) return undefined;
 	return result;
 }
 

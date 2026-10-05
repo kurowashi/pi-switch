@@ -6,5 +6,8 @@
   },
   "enabled": {
     "tools": ["exa_search"]
+  },
+  "sections": {
+    "disabled": ["docs"]
   }
 }

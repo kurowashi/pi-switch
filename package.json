@@ -1,8 +1,8 @@
 {
 	"name": "pi-switch",
 	"version": "0.1.0",
-	"description": "Toggle Pi tools, skills, and package resources per user or project scope from one TUI",
-	"keywords": ["pi-package", "pi", "switch", "tools", "skills", "packages", "toggle"],
+	"description": "Toggle Pi tools, skills, packages, and prompt sections per user or project scope from one TUI",
+	"keywords": ["pi-package", "pi", "switch", "tools", "skills", "packages", "sections", "toggle"],
 	"license": "MIT",
 	"type": "module",
 	"engines": {
@@ -13,15 +13,18 @@
 	},
 	"files": ["src"],
 	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
 		"@earendil-works/pi-coding-agent": "*",
 		"@earendil-works/pi-tui": "*"
 	},
 	"peerDependenciesMeta": {
+		"@earendil-works/pi-ai": { "optional": true },
 		"@earendil-works/pi-coding-agent": { "optional": true },
 		"@earendil-works/pi-tui": { "optional": true }
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.14",
+		"@earendil-works/pi-ai": "1.0.3",
 		"@earendil-works/pi-coding-agent": "1.0.3",
 		"@earendil-works/pi-tui": "1.0.3",
 		"@types/node": "^24.0.0",

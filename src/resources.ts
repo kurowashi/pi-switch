@@ -1,18 +1,21 @@
 /**
- * pi-switch resource discovery: which tools and skills this session sees, which
- * package owns each one, and the effective on/off state under a resolved
- * configuration.
+ * pi-switch resource discovery: which tools, skills, and prompt sections this
+ * session sees, which package owns each one, and the effective on/off state
+ * under a resolved configuration.
  *
  * Tools come from the live registry (`pi.getAllTools()`); skills come from the
  * prompt options at command time (`ctx.getSystemPromptOptions()`) or from the
- * `before_agent_start` event. `hidden` tools are never listed: Pi ignores them
- * in `setActiveTools`. See README.md#動作 for the user-facing description.
+ * `before_agent_start` event; prompt sections come from the names observed in
+ * `context_with_system` plus {@link BUILTIN_SECTIONS}. `hidden` tools are never
+ * listed: Pi ignores them in `setActiveTools`. See README.md#動作 for the
+ * user-facing description.
  */
 
+import type { SystemMessage } from "@earendil-works/pi-ai";
 import type { Skill, SourceInfo, ToolInfo } from "@earendil-works/pi-coding-agent";
 import type { ResolvedConfig, ToggleTarget } from "./config.ts";
 
-type ItemKind = "tool" | "skill";
+type ItemKind = "tool" | "skill" | "section";
 
 export interface CatalogItem {
 	kind: ItemKind;
@@ -33,6 +36,22 @@ export interface Catalog {
 	packages: PackageEntry[];
 }
 
+/**
+ * Sections Pi always builds for the default prompt. Extensions can add more
+ * (for example `knowledge_index`); the picker also lists names observed at
+ * request time.
+ */
+export const BUILTIN_SECTIONS: readonly string[] = [
+	"preamble",
+	"tools",
+	"rules",
+	"docs",
+	"addendum",
+	"project_context",
+	"skills",
+	"cwd",
+];
+
 export type PackageState = "on" | "off" | "partial";
 
 /** Drop the version so `npm:pi-exa@1.2.3` and `npm:pi-exa` group together. */
@@ -43,7 +62,11 @@ export function packageKeyFromSource(source: string): string {
 	return at > 0 ? `npm:${spec.slice(0, at)}` : source;
 }
 
-export function collectCatalog(tools: readonly ToolInfo[], skills: readonly Skill[]): Catalog {
+export function collectCatalog(
+	tools: readonly ToolInfo[],
+	skills: readonly Skill[],
+	sections: readonly string[] = [],
+): Catalog {
 	const items: CatalogItem[] = [];
 	const packages = new Map<string, PackageEntry>();
 	for (const tool of tools) {
@@ -65,13 +88,35 @@ export function collectCatalog(tools: readonly ToolInfo[], skills: readonly Skil
 		}
 		items.push(item);
 	}
+	for (const name of sections) {
+		items.push({ kind: "section", name, description: "" });
+	}
 	return { items, packages: [...packages.values()].sort((left, right) => left.name.localeCompare(right.name)) };
 }
 
 export function itemTarget(item: CatalogItem): ToggleTarget {
-	const target: ToggleTarget = { kind: item.kind === "tool" ? "tools" : "skills", name: item.name };
+	const kind = item.kind === "tool" ? "tools" : item.kind === "skill" ? "skills" : "sections";
+	const target: ToggleTarget = { kind, name: item.name };
 	if (item.packageName !== undefined) target.packageName = item.packageName;
 	return target;
+}
+
+export function filterPromptSections(current: SystemMessage, resolved: ResolvedConfig): SystemMessage | undefined {
+	const sections = current.sections;
+	if (sections === undefined) return undefined;
+	const kept: Record<string, string> = {};
+	let removed = false;
+	for (const [name, text] of Object.entries(sections)) {
+		if (text === null) continue;
+		if (resolved.isDisabled({ kind: "sections", name })) {
+			removed = true;
+			continue;
+		}
+		kept[name] = text;
+	}
+	// No disabled section: leave the message untouched so Pi keeps its replay-identical head.
+	if (!removed) return undefined;
+	return { ...current, sections: kept };
 }
 
 export function itemDisabled(resolved: ResolvedConfig, item: CatalogItem): boolean {

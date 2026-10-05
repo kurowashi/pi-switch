@@ -8,11 +8,14 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { SystemMessage } from "@earendil-works/pi-ai";
 import type { Skill, SourceInfo, ToolInfo } from "@earendil-works/pi-coding-agent";
 import { emptyConfig, parseConfig, resolveConfig } from "../../src/config.ts";
 import {
 	activeToolNames,
+	BUILTIN_SECTIONS,
 	collectCatalog,
+	filterPromptSections,
 	filterSkills,
 	itemDisabled,
 	itemTarget,
@@ -160,4 +163,92 @@ test("packageDisabled reads the package list directly", () => {
 	const resolved = resolveConfig(user.config, undefined);
 	assert.equal(packageDisabled(resolved, "npm:pi-exa"), true);
 	assert.equal(packageDisabled(resolved, "npm:pi-knowledge"), false);
+});
+
+test("BUILTIN_SECTIONS pins the sections Pi builds by default", () => {
+	assert.deepEqual(BUILTIN_SECTIONS, [
+		"preamble",
+		"tools",
+		"rules",
+		"docs",
+		"addendum",
+		"project_context",
+		"skills",
+		"cwd",
+	]);
+});
+
+test("collectCatalog appends section items without a package and itemTarget maps them", () => {
+	const catalog = collectCatalog([tool("read")], [], ["docs", "knowledge_index"]);
+	const sections = catalog.items.filter((item) => item.kind === "section");
+	assert.deepEqual(
+		sections.map((item) => `${item.name}:${item.packageName ?? "-"}`),
+		["docs:-", "knowledge_index:-"],
+	);
+	const [docs] = sections;
+	assert.ok(docs !== undefined);
+	assert.deepEqual(itemTarget(docs), { kind: "sections", name: "docs" });
+});
+
+test("itemDisabled resolves section names", () => {
+	const parsed = parseConfig('{"sections":{"disabled":["docs"]}}');
+	assert.ok(parsed.ok);
+	const catalog = collectCatalog([], [], ["docs", "rules"]);
+	const [docs, rules] = catalog.items;
+	assert.ok(docs !== undefined && rules !== undefined);
+	const resolved = resolveConfig(parsed.config, undefined);
+	assert.equal(itemDisabled(resolved, docs), true);
+	assert.equal(itemDisabled(resolved, rules), false);
+});
+
+function systemMessage(partial: Partial<SystemMessage> = {}): SystemMessage {
+	return { role: "system", content: "", timestamp: 0, ...partial };
+}
+
+test("filterPromptSections removes disabled sections and keeps the rest", () => {
+	const parsed = parseConfig('{"sections":{"disabled":["docs"]}}');
+	assert.ok(parsed.ok);
+	const toolsAdded = [{ name: "read" }] as unknown as NonNullable<SystemMessage["toolsAdded"]>;
+	const current = systemMessage({
+		content: "base",
+		sections: { preamble: "P", docs: "D", rules: "R" },
+		toolsAdded,
+		timestamp: 7,
+	});
+	const head = filterPromptSections(current, resolveConfig(parsed.config, undefined));
+	assert.ok(head !== undefined);
+	assert.deepEqual(head.sections, { preamble: "P", rules: "R" });
+	assert.equal(head.content, "base");
+	assert.equal(head.toolsAdded, toolsAdded);
+	assert.equal(head.timestamp, 7);
+});
+
+test("filterPromptSections leaves an unaffected or forced prompt alone", () => {
+	const parsed = parseConfig('{"sections":{"disabled":["docs"]}}');
+	assert.ok(parsed.ok);
+	const resolved = resolveConfig(parsed.config, undefined);
+	assert.equal(filterPromptSections(systemMessage({ sections: { rules: "R" } }), resolved), undefined);
+	assert.equal(filterPromptSections(systemMessage({ content: "forced" }), resolved), undefined);
+});
+
+test("filterPromptSections ignores null section entries", () => {
+	const parsed = parseConfig('{"sections":{"disabled":["docs"]}}');
+	assert.ok(parsed.ok);
+	const resolved = resolveConfig(parsed.config, undefined);
+	assert.equal(
+		filterPromptSections(systemMessage({ sections: { docs: null } }), resolved),
+		undefined,
+		"a null entry is already removed and must not trigger a rebuild",
+	);
+});
+
+test("filterPromptSections empties the sections key when everything is disabled", () => {
+	const parsed = parseConfig('{"sections":{"disabled":["docs","rules"]}}');
+	assert.ok(parsed.ok);
+	const head = filterPromptSections(
+		systemMessage({ content: "base", sections: { docs: "D", rules: "R" } }),
+		resolveConfig(parsed.config, undefined),
+	);
+	assert.ok(head !== undefined);
+	assert.deepEqual(head.sections, {});
 });

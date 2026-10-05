@@ -3,7 +3,7 @@
  *
  * pi-switch never registers a tool: the model learns about tools through Pi's own
  * declarations, and a pi-switch tool would tax every request. The picker is the
- * only command; the two events are the whole runtime footprint.
+ * only command; the three events are the whole runtime footprint.
  *
  * The extension is loaded through Pi's own loader (jiti), the same path Pi uses
  * at runtime, so these assertions cover the shipped artifact. The loader also
@@ -20,7 +20,7 @@ import { discoverAndLoadExtensions, type Extension, type LoadExtensionsResult } 
 import { PACKAGE_ROOT } from "../helpers/root.ts";
 
 /** The behaviors README.md documents, one registration each. */
-const EXPECTED_EVENTS = ["before_agent_start", "session_start"];
+const EXPECTED_EVENTS = ["before_agent_start", "context_with_system", "session_start"];
 const EXPECTED_COMMANDS = ["switch"];
 
 async function loadExtension(): Promise<Extension> {
