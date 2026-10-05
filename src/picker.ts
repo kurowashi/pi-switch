@@ -248,7 +248,8 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 
 	function itemLine(marker: string, item: CatalogItem, width: number): string {
 		const suffix = item.packageName === undefined ? "" : `  ${theme.fg("muted", item.packageName)}`;
-		const description = item.description === "" ? "" : `  ${theme.fg("dim", item.description)}`;
+		const text = singleLine(item.description);
+		const description = text === "" ? "" : `  ${theme.fg("dim", text)}`;
 		const state = itemDisabled(deps.resolved(), item) ? "off" : "on";
 		return truncateToWidth(
 			`${marker}${stateGlyph(state)} ${item.name}${suffix}${badges(itemTarget(item))}${description}`,
@@ -299,6 +300,11 @@ export async function runScopePicker(ctx: ExtensionCommandContext, deps: ScopePi
 	await ctx.ui.custom<void>((tui, theme, _keybindings, done) =>
 		createScopePicker(theme, deps, { requestRender: () => tui.requestRender(), close: () => done(undefined) }),
 	);
+}
+
+/** Pi tool and skill descriptions can carry line breaks; one rendered row must stay one terminal line. */
+function singleLine(text: string): string {
+	return text.replace(/[\r\n\v\f\u0085\u2028\u2029]+/g, " ").trim();
 }
 
 function matchesItem(item: CatalogItem, query: string): boolean {

@@ -582,3 +582,29 @@ test("the command refuses arguments and non-TUI modes", async () => {
 		}
 	});
 });
+
+test("a tool description with line breaks stays on one picker row", async () => {
+	await withAgentDirectory(async () => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			const multiline = {
+				...tool("tool_search"),
+				description: "# Tool discovery\r\n\r\nSearches over deferred tool metadata.\u000bMore.",
+			};
+			const harness = createHarness({ cwd, tools: [multiline] });
+			await harness.runCommand();
+			const picker = await harness.openPicker();
+			const lines = picker.render(120);
+			for (const line of lines) {
+				assert.doesNotMatch(
+					line,
+					/[\r\n\v\f\u0085\u2028\u2029]/,
+					`a row must stay one terminal line: ${JSON.stringify(line)}`,
+				);
+			}
+			assert.match(lines.join("\n"), /tool_search {2}# Tool discovery Searches over deferred tool metadata\. More\./);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});

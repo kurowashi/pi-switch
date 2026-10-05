@@ -62,6 +62,7 @@
 | パッケージ行は実効状態が `on` 以外のとき有効化、`on` のとき無効化する | `test/integration/extension.test.ts` | `src/picker.ts` の `toggleSelected` |
 | 未信頼の Project スコープではトグルせず理由を通知する | `test/integration/extension.test.ts` | `src/picker.ts` の `toggleSelected` |
 | Esc は絞り込みがあれば消し、無ければ閉じる | `test/integration/extension.test.ts` | `src/picker.ts` の `handleEscape` |
+| 複数行の説明文は1行に畳んでから幅で切る | `test/integration/extension.test.ts` | `src/picker.ts` の `singleLine` / `itemLine` |
 
 ### 依存関係・import
 
