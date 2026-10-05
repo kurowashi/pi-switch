@@ -1,10 +1,10 @@
 /**
- * pi-scope: enable or disable tools, skills, and whole packages per user or
+ * pi-switch: enable or disable tools, skills, and whole packages per user or
  * project scope.
  *
  * The two config files are the only state. Changes apply in place: tools
  * through `pi.setActiveTools`, skills through the `before_agent_start` prompt
- * options. `/scope` opens the picker. See README.md for the user-facing
+ * options. `/switch` opens the picker. See README.md for the user-facing
  * description and DESIGN.md for why unloading is out of scope.
  */
 
@@ -27,7 +27,7 @@ import {
 import { runScopePicker, type ScopeInfo, type ScopePickerDeps } from "./picker.ts";
 import { activeToolNames, collectCatalog, filterSkills } from "./resources.ts";
 
-export const COMMAND_NAME = "scope";
+export const COMMAND_NAME = "switch";
 
 export default function scopeExtension(pi: ExtensionAPI): void {
 	const agentDir = getAgentDir();
@@ -47,7 +47,7 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 		for (const file of [userFile, projectFile]) {
 			if (file === undefined || !file.malformed || warned.has(file.path)) continue;
 			warned.add(file.path);
-			ctx.ui.notify(`pi-scope: ignoring malformed config ${file.path}; it is never overwritten`, "warning");
+			ctx.ui.notify(`pi-switch: ignoring malformed config ${file.path}; it is never overwritten`, "warning");
 		}
 	}
 
@@ -65,7 +65,7 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 		const blocked = targets.filter((target) => resolved.isDisabled(target));
 		if (blocked.length === 0) return;
 		const names = blocked.map((target) => target.name).join(", ");
-		ctx.ui.notify(`pi-scope: enabled globally, but the project config keeps these disabled here: ${names}`, "warning");
+		ctx.ui.notify(`pi-switch: enabled globally, but the project config keeps these disabled here: ${names}`, "warning");
 	}
 
 	function toggle(
@@ -82,7 +82,7 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 		try {
 			writeConfigFile(file);
 		} catch (error) {
-			ctx.ui.notify(`pi-scope: ${error instanceof Error ? error.message : String(error)}`, "error");
+			ctx.ui.notify(`pi-switch: ${error instanceof Error ? error.message : String(error)}`, "error");
 			reload(ctx);
 		}
 		resolved = resolveConfig(userFile.config, projectFile?.config);
@@ -93,11 +93,11 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 	function writableFile(ctx: ExtensionCommandContext, scope: ScopeName): ScopeFile | undefined {
 		const file = scope === "user" ? userFile : projectFile;
 		if (file === undefined) {
-			ctx.ui.notify("pi-scope: the project scope is unavailable", "warning");
+			ctx.ui.notify("pi-switch: the project scope is unavailable", "warning");
 			return undefined;
 		}
 		if (file.malformed) {
-			ctx.ui.notify(`pi-scope: refusing to edit malformed config ${file.path}`, "error");
+			ctx.ui.notify(`pi-switch: refusing to edit malformed config ${file.path}`, "error");
 			return undefined;
 		}
 		return file;
@@ -139,11 +139,11 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 		description: "Enable or disable tools, skills, and packages per user or project scope",
 		handler: async (args, ctx) => {
 			if (args.trim() !== "") {
-				ctx.ui.notify(`pi-scope: /${COMMAND_NAME} takes no arguments`, "warning");
+				ctx.ui.notify(`pi-switch: /${COMMAND_NAME} takes no arguments`, "warning");
 				return;
 			}
 			if (ctx.mode !== "tui") {
-				ctx.ui.notify(`pi-scope: /${COMMAND_NAME} requires TUI mode`, "error");
+				ctx.ui.notify(`pi-switch: /${COMMAND_NAME} requires TUI mode`, "error");
 				return;
 			}
 			reload(ctx);

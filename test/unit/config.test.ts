@@ -29,7 +29,7 @@ import {
 } from "../../src/config.ts";
 
 function sandbox(): string {
-	return mkdtempSync(join(tmpdir(), "pi-scope-config-"));
+	return mkdtempSync(join(tmpdir(), "pi-switch-config-"));
 }
 
 function config(source: string): ScopeConfig {

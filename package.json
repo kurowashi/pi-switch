@@ -1,8 +1,8 @@
 {
-	"name": "pi-scope",
+	"name": "pi-switch",
 	"version": "0.1.0",
 	"description": "Toggle Pi tools, skills, and package resources per user or project scope from one TUI",
-	"keywords": ["pi-package", "pi", "scope", "tools", "skills", "packages", "toggle"],
+	"keywords": ["pi-package", "pi", "switch", "tools", "skills", "packages", "toggle"],
 	"license": "MIT",
 	"type": "module",
 	"engines": {

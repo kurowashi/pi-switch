@@ -1,6 +1,6 @@
-# AGENTS.md — pi-scope で作業するエージェント向けの指示
+# AGENTS.md — pi-switch で作業するエージェント向けの指示
 
-読者は pi-scope を変更する AI エージェントと開発者です。利用者向けの仕様は README に、設計の判断基準は DESIGN.md と PHILOSOPHY.md(このプラグイン群共通)に書きます。
+読者は pi-switch を変更する AI エージェントと開発者です。利用者向けの仕様は README に、設計の判断基準は DESIGN.md と PHILOSOPHY.md(このプラグイン群共通)に書きます。
 
 ここには、壊してはいけない制約と、制約に触れる変更の手順だけを書きます。制約の正はテストで、下の表はその索引です。実装と表が食い違った場合はテストが正です。検証手段を併記できないものは制約として書かず、自動テストできない範囲は末尾に分けます。
 
@@ -17,7 +17,7 @@
 | 制約 | 検証 | 定義・実装箇所 |
 |---|---|---|
 | モデル向けのツールを登録しない | `test/contract/surface.test.ts` | `src/index.ts` |
-| コマンドは `scope` の1つだけ | `test/contract/surface.test.ts` | `test/contract/surface.test.ts` の `EXPECTED_COMMANDS`、`src/index.ts` |
+| コマンドは `switch` の1つだけ | `test/contract/surface.test.ts` | `test/contract/surface.test.ts` の `EXPECTED_COMMANDS`、`src/index.ts` |
 | イベントは `session_start` / `before_agent_start` の2種で、各1ハンドラ | `test/contract/surface.test.ts` | `EXPECTED_EVENTS`、`src/index.ts` |
 | TUI 以外のモードではピッカーを開かずエラーを通知する | `test/integration/extension.test.ts` | `src/index.ts` の command ハンドラ |
 
@@ -25,7 +25,7 @@
 
 | 制約 | 検証 | 定義・実装箇所 |
 |---|---|---|
-| パスは user `<agent dir>/pi-scope.json`、project `<cwd>/.pi/pi-scope.json` | `test/unit/config.test.ts` | `src/config.ts` の `userConfigPath` / `projectConfigPath` |
+| パスは user `<agent dir>/pi-switch.json`、project `<cwd>/.pi/pi-switch.json` | `test/unit/config.test.ts` | `src/config.ts` の `userConfigPath` / `projectConfigPath` |
 | 適用順は user.disabled → user.enabled → project.disabled → project.enabled。未記載は有効 | `test/unit/config.test.ts` | `src/config.ts` の `resolveConfig` |
 | パッケージ指定は由来するツールとスキルすべてに効く | `test/unit/resources.test.ts` | `src/resources.ts` の `itemTarget` / `itemDisabled` |
 | npm の source は版を除いて正規化する(`npm:pi-exa@1.2.3` → `npm:pi-exa`) | `test/unit/resources.test.ts` | `src/resources.ts` の `packageKeyFromSource` |
@@ -112,7 +112,7 @@
 
 前提: TUI の Pi セッションで確認する。
 
-1. `/scope` でツールを無効にし、次のターンのモデルのツール一覧から消えること。有効に戻すと復帰すること。
+1. `/switch` でツールを無効にし、次のターンのモデルのツール一覧から消えること。有効に戻すと復帰すること。
 2. スキルを無効にし、システムプロンプトの `<available_skills>` から消えるが `/skill:<name>` は実行できること。
 3. パッケージを無効にし、由来ツールとスキルがまとめて消えること。Project の個別有効化で1つだけ戻せること。
 4. Global と Project の状態がそれぞれのファイルに保存され、再起動後も維持されること。

@@ -1,9 +1,9 @@
 /**
- * pi-scope configuration: where the two files live, how they are parsed,
+ * pi-switch configuration: where the two files live, how they are parsed,
  * merged into an effective state, and written back.
  *
- * The user file is `<agent dir>/pi-scope.json`; the project file is
- * `<cwd>/.pi/pi-scope.json` and is read and written only in trusted projects.
+ * The user file is `<agent dir>/pi-switch.json`; the project file is
+ * `<cwd>/.pi/pi-switch.json` and is read and written only in trusted projects.
  * A target is disabled when a layer disables it and no later layer enables it.
  * Layers apply in order, user then project, and inside a layer the enabled list
  * wins over the disabled list. Targets that no list mentions stay enabled.
@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 
-export const CONFIG_FILE_NAME = "pi-scope.json";
+export const CONFIG_FILE_NAME = "pi-switch.json";
 const CONFIG_VERSION = 1;
 
 export type ResourceKind = "tools" | "skills" | "packages";

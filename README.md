@@ -1,15 +1,15 @@
-# pi-scope
+# pi-switch
 
-Pi に拡張を入れると、拡張が提供するツールとスキルがモデル向けの一覧に加わります。コンテキストを食い、関係のないスキルが誤発火します。pi-scope は**モデルへの露出**を、Global（ユーザー全体）と Project（リポジトリ単位）の2スコープで切り替えます。
+Pi に拡張を入れると、拡張が提供するツールとスキルがモデル向けの一覧に加わります。コンテキストを食い、関係のないスキルが誤発火します。pi-switch は**モデルへの露出**を、Global（ユーザー全体）と Project（リポジトリ単位）の2スコープで切り替えます。
 
 - 粒度はツール個別・スキル個別・パッケージ一括の3つ
 - 変更は即時反映（reload 不要）
-- 設定は2つの JSON ファイルで、`/scope` の TUI から編集する
+- 設定は2つの JSON ファイルで、`/switch` の TUI から編集する
 
 ```
-$ /scope
+$ /switch
 
-pi-scope  [Global] Project
+pi-switch  [Global] Project
 filter: type to search
   Packages
   ● npm:pi-exa  2 tools · 1 skill
@@ -24,21 +24,21 @@ space toggle · tab scope · esc close        5/8 tools · 3/5 skills
 ## インストール
 
 ```bash
-pi install git:github.com/kurowashi/pi-scope
+pi install git:github.com/kurowashi/pi-switch
 ```
 
-ref を固定する場合は `pi install git:github.com/kurowashi/pi-scope@<tag|commit>`。
+ref を固定する場合は `pi install git:github.com/kurowashi/pi-switch@<tag|commit>`。
 
 ローカルの作業コピーを使う場合:
 
 ```bash
-pi install /path/to/pi-scope
+pi install /path/to/pi-switch
 ```
 
 または直接読み込み:
 
 ```bash
-pi --extension /path/to/pi-scope/src/index.ts
+pi --extension /path/to/pi-switch/src/index.ts
 ```
 
 Pi 1.0 以降が必要です。旧版へのフォールバックは持ちません。
@@ -49,8 +49,8 @@ Pi 1.0 以降が必要です。旧版へのフォールバックは持ちませ�
 
 | ファイル | 対象 | 読み書きの条件 |
 |---|---|---|
-| `<agent dir>/pi-scope.json`（通常 `~/.pi/agent/pi-scope.json`） | Global | 常に読み書きする |
-| `<cwd>/.pi/pi-scope.json` | Project | 信頼されたプロジェクトのときだけ読み書きする |
+| `<agent dir>/pi-switch.json`（通常 `~/.pi/agent/pi-switch.json`） | Global | 常に読み書きする |
+| `<cwd>/.pi/pi-switch.json` | Project | 信頼されたプロジェクトのときだけ読み書きする |
 
 `PI_CODING_AGENT_DIR` を設定すると1つ目の場所を変更できます。`.pi` の名前は Pi の `piConfig.configDir` に追従します。
 
@@ -67,7 +67,7 @@ Pi 1.0 以降が必要です。旧版へのフォールバックは持ちませ�
 }
 ```
 
-コピーして使う場合は [examples/pi-scope.example.json](examples/pi-scope.example.json)。
+コピーして使う場合は [examples/pi-switch.example.json](examples/pi-switch.example.json)。
 
 | キー | 型 | 意味 |
 |---|---|---|
@@ -102,7 +102,7 @@ Pi 1.0 以降が必要です。旧版へのフォールバックは持ちませ�
   - このとき Global ファイルには `enabled` の記録が残り、`g:on` バッジが出ます。このプロジェクトでは無効のままですが、Project が無効にしていない他のプロジェクトでは有効になります。実効状態が無効のままであれば、切り替え時に警告を表示します。
 - `version` 以外の未知のトップレベルフィールドは読み飛ばし、保存時にそのまま書き戻します。
 - JSON が壊れている、または既知フィールドの型が違うファイルは、警告を1回出して無視し、**上書きしません**。修復するか削除すると、次の読み込みから反映されます。
-- 信頼されていないプロジェクトのファイルは読みません。`/scope` の Project スコープは編集できず、理由を表示します。
+- 信頼されていないプロジェクトのファイルは読みません。`/switch` の Project スコープは編集できず、理由を表示します。
 
 ## 動作
 
@@ -115,20 +115,20 @@ Pi 1.0 以降が必要です。旧版へのフォールバックは持ちませ�
 | パッケージ | 由来するツールとスキルをまとめて無効にする | 次のリクエストから |
 
 - 拡張はアンロードしません。無効にしたパッケージのコマンドは使えます。
-- セッションの再読み込みは不要です。`/scope` で切り替えるとその場で反映されます。
-- 設定は、セッション開始時、`/scope` を開いたとき、および切り替える直前に読み込みます。手でファイルを編集した場合は `/scope` を開くと反映され、ピッカーを開いている間の外部編集も上書きしません。
-- 適用はセッション開始時と切り替え時だけです。他の拡張が後から変えたツールの有効状態を pi-scope は再主張しません。
+- セッションの再読み込みは不要です。`/switch` で切り替えるとその場で反映されます。
+- 設定は、セッション開始時、`/switch` を開いたとき、および切り替える直前に読み込みます。手でファイルを編集した場合は `/switch` を開くと反映され、ピッカーを開いている間の外部編集も上書きしません。
+- 適用はセッション開始時と切り替え時だけです。他の拡張が後から変えたツールの有効状態を pi-switch は再主張しません。
 - 切り替えのたびに、変更分は transcript のシステムメッセージの差分として積まれます。プロバイダによってはプロンプトキャッシュの一部が無効になり、次の応答が遅く高くつくことがあります。
 - 起動時に無効であるツールは、起動時の有効集合から差し引いて適用します。Pi の `defaultTools` や `--tools` の指定はそのまま尊重します。
-- カタログにないツール名（セッション開始後に登録されたもの）は、pi-scope の無効化の対象外としてそのまま残します。
+- カタログにないツール名（セッション開始後に登録されたもの）は、pi-switch の無効化の対象外としてそのまま残します。
 - `exposure: "hidden"` のツールは一覧に出しません。Pi がモデルへ宣言しないため、切り替えても意味がないからです。
-- スキル名が衝突した場合、Pi が見せる勝者だけが一覧に出ます。pi-scope も名前単位で扱い、衝突の可視化はしません。
+- スキル名が衝突した場合、Pi が見せる勝者だけが一覧に出ます。pi-switch も名前単位で扱い、衝突の可視化はしません。
 
 ## コマンド
 
 | コマンド | 動作 |
 |---|---|
-| `/scope` | TUI のピッカーを開く。引数は取らない |
+| `/switch` | TUI のピッカーを開く。引数は取らない |
 
 TUI モード専用です。print / JSON モードではエラーを表示します。
 

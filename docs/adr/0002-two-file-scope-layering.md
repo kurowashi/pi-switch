@@ -10,7 +10,7 @@
 
 ## 決定
 
-- Global は `<agent dir>/pi-scope.json`、Project は `<cwd>/.pi/pi-scope.json` に置きます。Project は信頼されたプロジェクトのときだけ読み書きします。
+- Global は `<agent dir>/pi-switch.json`、Project は `<cwd>/.pi/pi-switch.json` に置きます。Project は信頼されたプロジェクトのときだけ読み書きします。
 - 適用順は Global の `disabled`、Global の `enabled`、Project の `disabled`、Project の `enabled` です。各層の `enabled` はその層の `disabled` を打ち消し、後の層が常に勝ちます。
 - どのリストにも無い対象は有効のままです。
 
@@ -22,9 +22,9 @@
 
 ## 帰結
 
-- `/scope` の Project スコープは、未信頼プロジェクトでは編集できません。理由を画面に表示します。
+- `/switch` の Project スコープは、未信頼プロジェクトでは編集できません。理由を画面に表示します。
 - Project の設定をコミットする運用では、`npm:` パッケージのバージョン付き `sourceInfo.source`（例 `npm:pi-exa@1.2.3`）を正規化した `npm:pi-exa` で書きます。`npm:` 以外のソースは版を含む文字列のまま使います。
-- 既存の4象限モデルの設定ファイルは読み込めません。pi-scope は新しい形式のため移行は不要です。
+- 既存の4象限モデルの設定ファイルは読み込めません。pi-switch は新しい形式のため移行は不要です。
 
 ## 代替案
 

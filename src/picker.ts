@@ -1,10 +1,10 @@
 /**
- * The pi-scope picker: one searchable list of packages, tools, and skills with
+ * The pi-switch picker: one searchable list of packages, tools, and skills with
  * a live toggle for the active scope.
  *
  * The component is written by hand instead of using `SelectList` or
  * `SettingsList` because rows mix three kinds, carry per-scope state badges,
- * and toggling writes files. Tests drive `createScopePicker` directly; `/scope`
+ * and toggling writes files. Tests drive `createScopePicker` directly; `/switch`
  * wraps it in `ctx.ui.custom`. See README.md#コマンド for the keys.
  */
 
@@ -133,7 +133,7 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 	function toggleSelected(): void {
 		const scope = activeScope();
 		if (!scope.available) {
-			deps.notify(`pi-scope: ${scope.reason ?? "the project scope is unavailable"}`, "warning");
+			deps.notify(`pi-switch: ${scope.reason ?? "the project scope is unavailable"}`, "warning");
 			return;
 		}
 		const row = selectedRow();
@@ -207,7 +207,7 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 			.join(" ");
 		const active = activeScope();
 		const suffix = active.available ? "" : theme.fg("warning", `  ${active.reason ?? "unavailable"}`);
-		return truncateToWidth(`${theme.bold("pi-scope")}  ${tabs}${suffix}`, width);
+		return truncateToWidth(`${theme.bold("pi-switch")}  ${tabs}${suffix}`, width);
 	}
 
 	function filterLine(width: number): string {

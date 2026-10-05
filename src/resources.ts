@@ -1,5 +1,5 @@
 /**
- * pi-scope resource discovery: which tools and skills this session sees, which
+ * pi-switch resource discovery: which tools and skills this session sees, which
  * package owns each one, and the effective on/off state under a resolved
  * configuration.
  *

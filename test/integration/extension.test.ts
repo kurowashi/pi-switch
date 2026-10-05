@@ -206,16 +206,16 @@ function readJson(filePath: string): unknown {
 }
 
 function userConfig(agentDir: string): string {
-	return join(agentDir, "pi-scope.json");
+	return join(agentDir, "pi-switch.json");
 }
 
 function projectConfig(cwd: string): string {
-	return join(cwd, ".pi", "pi-scope.json");
+	return join(cwd, ".pi", "pi-switch.json");
 }
 
 /** Point getAgentDir() at a temporary directory for the duration of one test. */
 async function withAgentDirectory(run: (agentDir: string) => Promise<void>): Promise<void> {
-	const agentDir = temporaryDirectory("pi-scope-agent-");
+	const agentDir = temporaryDirectory("pi-switch-agent-");
 	const previous = process.env[AGENT_ENV];
 	process.env[AGENT_ENV] = agentDir;
 	try {
@@ -229,7 +229,7 @@ async function withAgentDirectory(run: (agentDir: string) => Promise<void>): Pro
 
 test("session_start applies disabled tools and skills from the user config", async () => {
 	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-scope-cwd-");
+		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			writeJson(userConfig(agentDir), { version: 1, disabled: { tools: ["off"], skills: ["hidden"] } });
 			const harness = createHarness({
@@ -254,7 +254,7 @@ test("session_start applies disabled tools and skills from the user config", asy
 
 test("a disabled package hides its tools and skills", async () => {
 	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-scope-cwd-");
+		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			writeJson(userConfig(agentDir), { version: 1, disabled: { packages: ["npm:pi-exa"] } });
 			const harness = createHarness({
@@ -279,7 +279,7 @@ test("a disabled package hides its tools and skills", async () => {
 
 test("session_start leaves the active set alone when nothing is disabled", async () => {
 	await withAgentDirectory(async () => {
-		const cwd = temporaryDirectory("pi-scope-cwd-");
+		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			const harness = createHarness({ cwd, active: ["a"], tools: [tool("a")] });
 			await harness.emit("session_start", { type: "session_start", reason: "startup" });
@@ -293,8 +293,8 @@ test("session_start leaves the active set alone when nothing is disabled", async
 
 test("a trusted project can enable what the user disabled, an untrusted one is ignored", async () => {
 	await withAgentDirectory(async (agentDir) => {
-		const trustedCwd = temporaryDirectory("pi-scope-trusted-");
-		const untrustedCwd = temporaryDirectory("pi-scope-untrusted-");
+		const trustedCwd = temporaryDirectory("pi-switch-trusted-");
+		const untrustedCwd = temporaryDirectory("pi-switch-untrusted-");
 		try {
 			writeJson(userConfig(agentDir), { version: 1, disabled: { tools: ["a"] } });
 			writeJson(projectConfig(trustedCwd), { version: 1, enabled: { tools: ["a"] } });
@@ -316,7 +316,7 @@ test("a trusted project can enable what the user disabled, an untrusted one is i
 
 test("a toggle re-reads the files so an external edit is not clobbered", async () => {
 	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-scope-cwd-");
+		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			const harness = createHarness({ cwd, active: ["a", "b"], tools: [tool("a"), tool("b")] });
 			await harness.runCommand();
@@ -332,7 +332,7 @@ test("a toggle re-reads the files so an external edit is not clobbered", async (
 
 test("a failed write is reported, leaves no file, and is re-read", async () => {
 	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-scope-cwd-");
+		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			const harness = createHarness({ cwd, active: ["a"], tools: [tool("a")] });
 			await harness.runCommand();
@@ -354,7 +354,7 @@ test("a failed write is reported, leaves no file, and is re-read", async () => {
 
 test("enabling globally against a project disable reports that this project stays disabled", async () => {
 	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-scope-cwd-");
+		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			writeJson(userConfig(agentDir), { version: 1, disabled: { tools: ["a"] } });
 			writeJson(projectConfig(cwd), { version: 1, disabled: { tools: ["a"] } });
@@ -372,7 +372,7 @@ test("enabling globally against a project disable reports that this project stay
 
 test("the picker toggles a tool in the user scope and applies it immediately", async () => {
 	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-scope-cwd-");
+		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			const harness = createHarness({ cwd, active: ["a", "b"], tools: [tool("a"), tool("b")] });
 			await harness.runCommand();
@@ -390,7 +390,7 @@ test("the picker toggles a tool in the user scope and applies it immediately", a
 
 test("the picker toggles a whole package from its row", async () => {
 	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-scope-cwd-");
+		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			const harness = createHarness({
 				cwd,
@@ -414,7 +414,7 @@ test("the picker toggles a whole package from its row", async () => {
 
 test("the picker enables a package row that the config disabled", async () => {
 	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-scope-cwd-");
+		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			writeJson(userConfig(agentDir), { version: 1, disabled: { packages: ["npm:pi-exa"] } });
 			const harness = createHarness({
@@ -438,7 +438,7 @@ test("the picker enables a package row that the config disabled", async () => {
 
 test("a partial package row shows the partial glyph and turns every child on", async () => {
 	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-scope-cwd-");
+		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			writeJson(userConfig(agentDir), { version: 1, disabled: { tools: ["a"] } });
 			const harness = createHarness({
@@ -463,7 +463,7 @@ test("a partial package row shows the partial glyph and turns every child on", a
 
 test("the picker switches to project scope and writes the project file", async () => {
 	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-scope-cwd-");
+		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			const harness = createHarness({ cwd, trusted: true, active: ["a", "b"], tools: [tool("a"), tool("b")] });
 			await harness.runCommand();
@@ -481,7 +481,7 @@ test("the picker switches to project scope and writes the project file", async (
 
 test("an untrusted project blocks project toggles", async () => {
 	await withAgentDirectory(async () => {
-		const cwd = temporaryDirectory("pi-scope-cwd-");
+		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			const harness = createHarness({ cwd, trusted: false, active: ["a"], tools: [tool("a")] });
 			await harness.runCommand();
@@ -500,7 +500,7 @@ test("an untrusted project blocks project toggles", async () => {
 
 test("filtering narrows rows, backspace edits, and escape clears then closes", async () => {
 	await withAgentDirectory(async () => {
-		const cwd = temporaryDirectory("pi-scope-cwd-");
+		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			const harness = createHarness({ cwd, active: ["alpha", "beta"], tools: [tool("alpha"), tool("beta")] });
 			await harness.runCommand();
@@ -527,7 +527,7 @@ test("filtering narrows rows, backspace edits, and escape clears then closes", a
 
 test("the selection moves and toggles the next row", async () => {
 	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-scope-cwd-");
+		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			const harness = createHarness({ cwd, active: ["a", "b"], tools: [tool("a"), tool("b")] });
 			await harness.runCommand();
@@ -546,7 +546,7 @@ test("the selection moves and toggles the next row", async () => {
 
 test("a malformed user config is warned about once and is never overwritten", async () => {
 	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-scope-cwd-");
+		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			writeFileSync(userConfig(agentDir), "{ nope", "utf8");
 			const harness = createHarness({ cwd, active: ["a"], tools: [tool("a")] });
@@ -568,7 +568,7 @@ test("a malformed user config is warned about once and is never overwritten", as
 
 test("the command refuses arguments and non-TUI modes", async () => {
 	await withAgentDirectory(async () => {
-		const cwd = temporaryDirectory("pi-scope-cwd-");
+		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			const harness = createHarness({ cwd });
 			await harness.runCommand("extra");

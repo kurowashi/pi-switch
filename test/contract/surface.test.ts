@@ -1,8 +1,8 @@
 /**
  * Contract: the model-facing surface stays empty, and the documented events exist.
  *
- * pi-scope never registers a tool: the model learns about tools through Pi's own
- * declarations, and a pi-scope tool would tax every request. The picker is the
+ * pi-switch never registers a tool: the model learns about tools through Pi's own
+ * declarations, and a pi-switch tool would tax every request. The picker is the
  * only command; the two events are the whole runtime footprint.
  *
  * The extension is loaded through Pi's own loader (jiti), the same path Pi uses
@@ -21,10 +21,10 @@ import { PACKAGE_ROOT } from "../helpers/root.ts";
 
 /** The behaviors README.md documents, one registration each. */
 const EXPECTED_EVENTS = ["before_agent_start", "session_start"];
-const EXPECTED_COMMANDS = ["scope"];
+const EXPECTED_COMMANDS = ["switch"];
 
 async function loadExtension(): Promise<Extension> {
-	const sandbox = mkdtempSync(join(tmpdir(), "pi-scope-surface-"));
+	const sandbox = mkdtempSync(join(tmpdir(), "pi-switch-surface-"));
 	process.env["PI_CODING_AGENT_DIR"] = sandbox;
 	const result: LoadExtensionsResult = await discoverAndLoadExtensions(
 		[join(PACKAGE_ROOT, "src", "index.ts")],
