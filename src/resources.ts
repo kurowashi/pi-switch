@@ -8,7 +8,7 @@
  * `before_agent_start` event; prompt sections come from the names observed in
  * `context_with_system` plus {@link BUILTIN_SECTIONS}. `hidden` tools are never
  * listed: Pi ignores them in `setActiveTools`. MCP tools carry a `mcp__<server>`
- * namespace, which pi-switch uses as their group key. See README.md#動作 for the
+ * namespace, which pi-switch uses as their group key. See README.md#仕組み for the
  * user-facing description.
  */
 
