@@ -29,7 +29,7 @@
 | 適用順は user.disabled → user.enabled → project.disabled → project.enabled。未記載は有効 | `test/unit/config.test.ts` | `src/config.ts` の `resolveConfig` |
 | プロンプトセクションはトップレベル `sections` キーだけに置き、`disabled` / `enabled` マップには置かない | `test/unit/config.test.ts` | `src/config.ts` の `parseSections` / `parseLists` |
 | `sections` の欠落は空として読む | `test/unit/config.test.ts` | `src/config.ts` の `parseSections` |
-| パッケージ指定は由来するツールとスキルすべてに効く | `test/unit/resources.test.ts` | `src/resources.ts` の `itemTarget` / `itemDisabled` |
+| パッケージと MCP サーバーの指定は由来するツールとスキルすべてに効く | `test/unit/resources.test.ts` | `src/resources.ts` の `itemTarget` / `itemDisabled` |
 | npm の source は版を除いて正規化する(`npm:pi-exa@1.2.3` → `npm:pi-exa`) | `test/unit/resources.test.ts` | `src/resources.ts` の `packageKeyFromSource` |
 | リストはソートと重複除去で正規化する | `test/unit/config.test.ts` | `src/config.ts` の `normalizeList` |
 | 未知のトップレベルフィールドを保存時に保持する | `test/unit/config.test.ts` | `src/config.ts` の `extraFields` / `serializeConfig` |
@@ -45,15 +45,18 @@
 
 | 制約 | 検証 | 定義・実装箇所 |
 |---|---|---|
-| ツールは起動時の有効集合から無効分を引いた集合を `setActiveTools` で適用する | `test/unit/resources.test.ts` + `test/integration/extension.test.ts` | `src/resources.ts` の `activeToolNames`、`src/index.ts` の `applyTools` |
-| カタログに無いツール名はそのまま残す | `test/unit/resources.test.ts` | `src/resources.ts` の `activeToolNames` |
+| ツールは現在の有効集合から無効分を外して適用する | `test/unit/resources.test.ts` + `test/integration/extension.test.ts` | `src/resources.ts` の `applyToolState`、`src/index.ts` の `applyTools` |
+| 無効化で外した名前は hidden として保持し、有効化で復元する | `test/unit/resources.test.ts` + `test/integration/extension.test.ts` | `src/resources.ts` の `applyToolState` |
+| hidden に入るのは `direct` / `model-only` の無効ツールだけ | `test/unit/resources.test.ts` | `src/resources.ts` の `applyToolState` / `isDeclarable` |
+| カタログに無いツール名はそのまま残す | `test/unit/resources.test.ts` | `src/resources.ts` の `applyToolState` |
+| 登録ツールの変化が無いターンでは再適用しない | `test/integration/extension.test.ts` | `src/index.ts` の `toolsChanged` |
 | `exposure: "hidden"` のツールは一覧に出さない | `test/unit/resources.test.ts` | `src/resources.ts` の `collectCatalog` |
 | スキルは `before_agent_start` の `systemPromptOptions.skills` をフィルタする | `test/integration/extension.test.ts` | `src/index.ts` の before_agent_start ハンドラ |
 | 無効なセクションはリクエスト先頭の system message から除去する | `test/unit/resources.test.ts` + `test/integration/extension.test.ts` | `src/resources.ts` の `filterPromptSections`、`src/index.ts` |
 | 無効対象が無ければリクエストを再構築しない | `test/unit/resources.test.ts` | `src/resources.ts` の `filterPromptSections` |
 | フィルタ後も先頭 system message の `content` / `toolsAdded` を保持する | `test/unit/resources.test.ts` + `test/integration/extension.test.ts` | `src/resources.ts` の `filterPromptSections` |
 | 一覧はビルトイン ∪ 観測済みセクション名 | `test/unit/resources.test.ts` | `src/resources.ts` の `BUILTIN_SECTIONS`、`src/index.ts` の `observedSections` |
-| ツールの適用は session_start とトグル時のみ(毎ターン再主張しない) | `test/integration/extension.test.ts` | `src/index.ts` の `applyTools` の呼び出し箇所 |
+| ツールの適用は session_start・トグル時・登録ツールの変化を検知した before_agent_start 時のみ | `test/integration/extension.test.ts` | `src/index.ts` の `applyTools` の呼び出し箇所 |
 | 有効集合が変わらないとき `setActiveTools` を呼ばない | `test/integration/extension.test.ts` | `src/index.ts` の `applyTools` |
 | トグルは書き込みの前に両ファイルを読み直し、外部編集を保持する | `test/integration/extension.test.ts` | `src/index.ts` の `toggle` |
 | Global の有効化が Project の無効化で打ち消されるとき警告する | `test/integration/extension.test.ts` | `src/index.ts` の `notifyIfIneffective` |
@@ -63,8 +66,13 @@
 
 | 制約 | 検証 | 定義・実装箇所 |
 |---|---|---|
-| 行は Packages → Tools → Skills → Sections の順で、空のセクションを出さない | `test/integration/extension.test.ts` | `src/picker.ts` の `view` / `appendSection` |
-| 絞り込みは名前・パッケージ名・説明に一致する | `test/integration/extension.test.ts` | `src/picker.ts` の `matchesItem` |
+| 行は Packages → MCP → Tools → Skills → Sections の順で、空のセクションを出さない | `test/integration/extension.test.ts` | `src/picker.ts` の `view` / `rowsFor` |
+| MCP サーバーは namespace(`mcp__` 接頭辞)でグループ化する | `test/unit/resources.test.ts` | `src/resources.ts` の `mcpPackageName` / `collectCatalog` |
+| MCP 行はグループキーだけを書き、子ツールを列挙しない | `test/integration/extension.test.ts` | `src/picker.ts` の `togglePackage` |
+| Home / End は先頭 / 末尾の選択行へ移動する | `test/integration/extension.test.ts` | `src/picker.ts` の `moveTo` |
+| PageUp / PageDown は1ページ分を先頭・末尾でクランプして移動する | `test/integration/extension.test.ts` | `src/picker.ts` の `movePage` |
+| セクションの説明はビルトインの固定文と、観測した本文の先頭行から作る | `test/integration/extension.test.ts` | `src/index.ts` の `sectionDescription` / `sectionEntries` |
+| 絞り込みは名前と説明に一致する | `test/integration/extension.test.ts` | `src/picker.ts` の `matchesItem` / `matchesPackage` |
 | パッケージ行は実効状態が `on` 以外のとき有効化、`on` のとき無効化する | `test/integration/extension.test.ts` | `src/picker.ts` の `toggleSelected` |
 | 未信頼の Project スコープではトグルせず理由を通知する | `test/integration/extension.test.ts` | `src/picker.ts` の `toggleSelected` |
 | Esc は絞り込みがあれば消し、無ければ閉じる | `test/integration/extension.test.ts` | `src/picker.ts` の `handleEscape` |
@@ -127,3 +135,7 @@
 6. 壊れた設定ファイルを置いても設定が空になるだけで、ファイルが破壊されないこと。
 7. `/switch` の Sections で `docs` を無効にし、次のターンのシステムプロンプトから `<docs>` が消え、セッションファイルには残ること。有効に戻すと復帰すること。
 8. 未信頼のプロジェクトで Project ファイルのセクション設定が読まれず、書き込みが拒否されること。
+9. `/switch` の MCP 行でサーバーを無効化し、そのサーバーの `direct` ツールが次のターンのツール一覧から消えること。有効に戻すと復帰すること。サーバーへの接続は維持されること。
+10. MCP サーバーがセッション開始後に接続しても、無効なサーバーの `direct` ツールが最初のリクエストから無効になっていること。
+11. Sections の行に説明が表示されること。ビルトインは固定文、`knowledge_index` などは本文の先頭行になること。
+12. PageUp / PageDown / Home / End で選択が端または1ページ分動くこと。

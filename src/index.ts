@@ -1,6 +1,6 @@
 /**
- * pi-switch: enable or disable tools, skills, packages, and prompt sections
- * per user or project scope.
+ * pi-switch: enable or disable tools, skills, packages, MCP servers, and
+ * prompt sections per user or project scope.
  *
  * The two config files are the only state. Changes apply in place: tools
  * through `pi.setActiveTools`, skills through the `before_agent_start` prompt
@@ -27,19 +27,32 @@ import {
 	writeConfigFile,
 } from "./config.ts";
 import { runScopePicker, type ScopeInfo, type ScopePickerDeps } from "./picker.ts";
-import { activeToolNames, BUILTIN_SECTIONS, collectCatalog, filterPromptSections, filterSkills } from "./resources.ts";
+import {
+	applyToolState,
+	BUILTIN_SECTIONS,
+	collectCatalog,
+	filterPromptSections,
+	filterSkills,
+	type SectionEntry,
+} from "./resources.ts";
 
 export const COMMAND_NAME = "switch";
+
+/** Longest derived section description kept for the picker. */
+const SECTION_DESCRIPTION_LIMIT = 120;
 
 export default function scopeExtension(pi: ExtensionAPI): void {
 	const agentDir = getAgentDir();
 	let userFile: ScopeFile = { path: userConfigPath(agentDir), config: emptyConfig(), malformed: false };
 	let projectFile: ScopeFile | undefined;
 	let resolved: ResolvedConfig = resolveConfig(userFile.config, undefined);
-	let baseline: string[] | undefined;
+	/** Tools removed because the config disables them, so enabling restores them. */
+	let hiddenTools: string[] = [];
+	/** Registered tool names at the last application, to notice late registrations. */
+	let knownTools: string[] = [];
 	const warned = new Set<string>();
-	/** Section names seen in a request. The picker also lists #{@link BUILTIN_SECTIONS}. */
-	const observedSections = new Set<string>();
+	/** Section names seen in a request, with the description derived from each body. */
+	const observedSections = new Map<string, string>();
 
 	function reload(ctx: ExtensionContext): void {
 		userFile = readConfigFile(userConfigPath(agentDir));
@@ -56,11 +69,19 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 	}
 
 	function applyTools(): void {
-		baseline ??= pi.getActiveTools();
-		const next = activeToolNames(baseline, pi.getAllTools(), resolved);
+		const tools = pi.getAllTools();
 		const current = pi.getActiveTools();
-		if (next.length === current.length && next.every((name, index) => name === current[index])) return;
-		pi.setActiveTools(next);
+		const state = applyToolState(current, hiddenTools, tools, resolved);
+		hiddenTools = state.hidden;
+		knownTools = tools.map((tool) => tool.name);
+		if (sameNames(state.active, current)) return;
+		pi.setActiveTools(state.active);
+	}
+
+	/** True when tools registered or disappeared since the last application. */
+	function toolsChanged(): boolean {
+		const names = pi.getAllTools().map((tool) => tool.name);
+		return !sameNames(names, knownTools);
 	}
 
 	/** Global enable cannot beat a project disable; say so instead of leaving the user guessing. */
@@ -115,13 +136,18 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 		return [{ name: "user", available: true }, project];
 	}
 
-	function sectionNames(): string[] {
-		return [...new Set([...BUILTIN_SECTIONS, ...observedSections])].sort();
+	function sectionEntries(): SectionEntry[] {
+		const entries = new Map<string, string>();
+		for (const section of BUILTIN_SECTIONS) entries.set(section.name, section.description);
+		for (const [name, description] of observedSections) if (!entries.has(name)) entries.set(name, description);
+		return [...entries]
+			.map(([name, description]) => ({ name, description }))
+			.sort((left, right) => left.name.localeCompare(right.name));
 	}
 
 	function dependencies(ctx: ExtensionCommandContext): ScopePickerDeps {
 		return {
-			catalog: () => collectCatalog(pi.getAllTools(), ctx.getSystemPromptOptions().skills ?? [], sectionNames()),
+			catalog: () => collectCatalog(pi.getAllTools(), ctx.getSystemPromptOptions().skills ?? [], sectionEntries()),
 			resolved: () => resolved,
 			scopes,
 			layerState: (scope: ScopeName, target: ToggleTarget) =>
@@ -135,11 +161,13 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => {
 		reload(ctx);
 		warnMalformed(ctx);
-		baseline = pi.getActiveTools();
+		hiddenTools = [];
 		applyTools();
 	});
 
 	pi.on("before_agent_start", (event) => {
+		// MCP servers connect after session_start; apply their disabled state before this request.
+		if (toolsChanged()) applyTools();
 		event.systemPromptOptions.skills = filterSkills(event.systemPromptOptions.skills, resolved);
 	});
 
@@ -148,7 +176,10 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 	pi.on("context_with_system", (event) => {
 		const current = getCurrentSystemMessage(event.messages);
 		if (current === undefined) return undefined;
-		for (const name of Object.keys(current.sections ?? {})) observedSections.add(name);
+		for (const [name, text] of Object.entries(current.sections ?? {})) {
+			if (text === null || observedSections.has(name)) continue;
+			observedSections.set(name, sectionDescription(text));
+		}
 		const head = filterPromptSections(current, resolved);
 		if (head === undefined) return undefined;
 		// Rebuilding collapses mid-conversation system messages into the replayed head,
@@ -157,7 +188,7 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand(COMMAND_NAME, {
-		description: "Enable or disable tools, skills, packages, and prompt sections per user or project scope",
+		description: "Enable or disable tools, skills, packages, MCP servers, and prompt sections per scope",
 		handler: async (args, ctx) => {
 			if (args.trim() !== "") {
 				ctx.ui.notify(`pi-switch: /${COMMAND_NAME} takes no arguments`, "warning");
@@ -172,4 +203,22 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 			await runScopePicker(ctx, dependencies(ctx));
 		},
 	});
+}
+
+function sameNames(left: readonly string[], right: readonly string[]): boolean {
+	return left.length === right.length && left.every((name, index) => name === right[index]);
+}
+
+/**
+ * Describe a prompt section by its first real line. Pi wraps every section in
+ * a tag of its own name, so skip the tag line and markdown heading markers.
+ */
+function sectionDescription(text: string): string {
+	for (const raw of text.split("\n")) {
+		const line = raw.trim();
+		if (line === "" || /^<\/?[A-Za-z0-9_-]+>$/.test(line)) continue;
+		const heading = line.replace(/^#+\s*/, "");
+		return heading.length > SECTION_DESCRIPTION_LIMIT ? `${heading.slice(0, SECTION_DESCRIPTION_LIMIT - 1)}…` : heading;
+	}
+	return "";
 }

@@ -1,9 +1,9 @@
 /**
- * The pi-switch picker: one searchable list of packages, tools, skills, and
- * prompt sections with a live toggle for the active scope.
+ * The pi-switch picker: one searchable list of packages, MCP servers, tools,
+ * skills, and prompt sections with a live toggle for the active scope.
  *
  * The component is written by hand instead of using `SelectList` or
- * `SettingsList` because rows mix four kinds, carry per-scope state badges,
+ * `SettingsList` because rows mix several kinds, carry per-scope state badges,
  * and toggling writes files. Tests drive `createScopePicker` directly; `/switch`
  * wraps it in `ctx.ui.custom`. See README.md#コマンド for the keys.
  */
@@ -77,38 +77,32 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 		return scope ?? { name: "user", available: true };
 	}
 
+	function rowsFor(label: string, entries: Row[]): Row[] {
+		return entries.length === 0 ? [] : [{ type: "section" as const, label }, ...entries];
+	}
+
+	function groupRows(catalog: Catalog, kind: PackageEntry["kind"], query: string): Row[] {
+		return catalog.packages
+			.filter((entry) => entry.kind === kind && matchesPackage(entry, query))
+			.map((entry) => ({ type: "package" as const, name: entry.name }));
+	}
+
+	function itemRows(catalog: Catalog, kind: CatalogItem["kind"], query: string): Row[] {
+		return catalog.items
+			.filter((item) => item.kind === kind && matchesItem(item, query))
+			.map((item) => ({ type: "item" as const, item }));
+	}
+
 	function view(): View {
 		const catalog = deps.catalog();
 		const query = filter.trim().toLowerCase();
-		const rows: Row[] = [];
-		appendSection(
-			rows,
-			"Packages",
-			catalog.packages
-				.filter((entry) => matchesPackage(entry, query))
-				.map((entry) => ({ type: "package" as const, name: entry.name })),
-		);
-		appendSection(
-			rows,
-			"Tools",
-			catalog.items
-				.filter((item) => item.kind === "tool" && matchesItem(item, query))
-				.map((item) => ({ type: "item" as const, item })),
-		);
-		appendSection(
-			rows,
-			"Skills",
-			catalog.items
-				.filter((item) => item.kind === "skill" && matchesItem(item, query))
-				.map((item) => ({ type: "item" as const, item })),
-		);
-		appendSection(
-			rows,
-			"Sections",
-			catalog.items
-				.filter((item) => item.kind === "section" && matchesItem(item, query))
-				.map((item) => ({ type: "item" as const, item })),
-		);
+		const rows: Row[] = [
+			...rowsFor("Packages", groupRows(catalog, "package", query)),
+			...rowsFor("MCP", groupRows(catalog, "mcp", query)),
+			...rowsFor("Tools", itemRows(catalog, "tool", query)),
+			...rowsFor("Skills", itemRows(catalog, "skill", query)),
+			...rowsFor("Sections", itemRows(catalog, "section", query)),
+		];
 		return { rows, selectable: rows.flatMap((row, index) => (row.type === "section" ? [] : [index])) };
 	}
 
@@ -131,6 +125,17 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 		callbacks.requestRender();
 	}
 
+	function moveTo(index: number): void {
+		const count = view().selectable.length;
+		if (count === 0) return;
+		selected = Math.max(0, Math.min(index, count - 1));
+		callbacks.requestRender();
+	}
+
+	function movePage(direction: number): void {
+		moveTo(selected + direction * MAX_VISIBLE_ROWS);
+	}
+
 	function switchScope(): void {
 		const count = scopes().length;
 		scopeIndex = (scopeIndex + 1) % count;
@@ -145,13 +150,19 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 		}
 		const row = selectedRow();
 		if (row === undefined || row.type === "section") return;
-		if (row.type === "package") togglePackage(scope.name, row.name, deps.catalog());
+		if (row.type === "package") togglePackage(scope.name, row.name);
 		else deps.toggle(scope.name, [itemTarget(row.item)], itemDisabled(deps.resolved(), row.item));
 		refresh();
 	}
 
-	function togglePackage(scope: ScopeName, name: string, catalog: Catalog): void {
+	function togglePackage(scope: ScopeName, name: string): void {
+		const catalog = deps.catalog();
 		const enabled = packageState(catalog, deps.resolved(), name) !== "on";
+		// An MCP server can own dozens of tools; its row writes only the group key.
+		if (catalog.packages.find((entry) => entry.name === name)?.kind === "mcp") {
+			deps.toggle(scope, [{ kind: "packages", name }], enabled);
+			return;
+		}
 		const targets: ToggleTarget[] = [{ kind: "packages", name }];
 		for (const item of catalog.items) {
 			if (item.packageName === name) targets.push(itemTarget(item));
@@ -171,6 +182,10 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 		{ key: Key.tab, run: switchScope },
 		{ key: Key.up, run: () => move(-1) },
 		{ key: Key.down, run: () => move(1) },
+		{ key: Key.pageUp, run: () => movePage(-1) },
+		{ key: Key.pageDown, run: () => movePage(1) },
+		{ key: Key.home, run: () => moveTo(0) },
+		{ key: Key.end, run: () => moveTo(view().selectable.length - 1) },
 		{ key: Key.space, run: toggleSelected },
 		{ key: Key.enter, run: toggleSelected },
 		{ key: Key.backspace, run: deleteFilterChar },
@@ -246,9 +261,18 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 		const catalog = deps.catalog();
 		const entry = catalog.packages.find((candidate) => candidate.name === name);
 		const state = packageState(catalog, deps.resolved(), name);
-		const counts = entry === undefined ? "" : `${entry.tools.length} tools · ${entry.skills.length} skills`;
+		const counts =
+			entry === undefined
+				? ""
+				: entry.kind === "mcp"
+					? `${entry.tools.length} tools`
+					: `${entry.tools.length} tools · ${entry.skills.length} skills`;
+		const description =
+			entry?.kind === "mcp" && entry.description !== undefined
+				? `  ${theme.fg("dim", singleLine(entry.description))}`
+				: "";
 		return truncateToWidth(
-			`${marker}${stateGlyph(state)} ${theme.bold(name)}  ${theme.fg("muted", counts)}${badges({ kind: "packages", name })}`,
+			`${marker}${stateGlyph(state)} ${theme.bold(name)}  ${theme.fg("muted", counts)}${badges({ kind: "packages", name })}${description}`,
 			width,
 		);
 	}
@@ -319,13 +343,9 @@ function matchesItem(item: CatalogItem, query: string): boolean {
 	return [item.name, item.packageName ?? "", item.description].join("\n").toLowerCase().includes(query);
 }
 
-function appendSection(rows: Row[], label: string, entries: Row[]): void {
-	if (entries.length === 0) return;
-	rows.push({ type: "section", label }, ...entries);
-}
-
 function matchesPackage(entry: PackageEntry, query: string): boolean {
-	return query === "" || entry.name.toLowerCase().includes(query);
+	if (query === "") return true;
+	return [entry.name, entry.description ?? ""].join("\n").toLowerCase().includes(query);
 }
 
 function isPrintable(data: string): boolean {

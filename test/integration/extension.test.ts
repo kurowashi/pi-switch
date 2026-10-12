@@ -70,6 +70,8 @@ interface Harness {
 	emit(event: string, data: unknown): Promise<unknown>;
 	runCommand(args?: string): Promise<void>;
 	openPicker(): Promise<Component>;
+	/** Simulate a late registration, like an MCP server connecting: the tool becomes active. */
+	registerTools(...added: ToolInfo[]): void;
 	closed(): boolean;
 }
 
@@ -97,6 +99,13 @@ function tool(name: string, sourceInfo: SourceInfo = source()): ToolInfo {
 		exposure: "direct",
 		sourceInfo,
 	} as unknown as ToolInfo;
+}
+
+function mcpTool(name: string, server: string, description?: string): ToolInfo {
+	return {
+		...tool(name),
+		namespace: { name: `mcp__${server}`, ...(description === undefined ? {} : { description }) },
+	};
 }
 
 function skill(name: string, sourceInfo: SourceInfo = source()): Skill {
@@ -134,7 +143,7 @@ function createHarness(options: HarnessOptions): Harness {
 	const commands = new Map<string, { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> }>();
 	const notifications: Notification[] = [];
 	const setActiveCalls: string[][] = [];
-	const tools = options.tools ?? [];
+	let tools = options.tools ?? [];
 	let active = [...(options.active ?? [])];
 	let factory: Factory | undefined;
 	let closed = false;
@@ -201,6 +210,10 @@ function createHarness(options: HarnessOptions): Harness {
 			return await factory({ requestRender: () => {} }, THEME, {}, () => {
 				closed = true;
 			});
+		},
+		registerTools(...added: ToolInfo[]) {
+			tools = [...tools, ...added];
+			active = [...active, ...added.map((entry) => entry.name)];
 		},
 		closed: () => closed,
 	};
@@ -718,6 +731,114 @@ test("a tool description with line breaks stays on one picker row", async () => 
 				);
 			}
 			assert.match(lines.join("\n"), /tool_search {2}# Tool discovery Searches over deferred tool metadata\. More\./);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("the picker lists MCP servers and toggles the whole group with one write", async () => {
+	await withAgentDirectory(async (agentDir) => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			const harness = createHarness({
+				cwd,
+				active: ["mcp__docs__search", "mcp__docs__read"],
+				tools: [mcpTool("mcp__docs__search", "docs", "Searches the docs"), mcpTool("mcp__docs__read", "docs")],
+			});
+			await harness.runCommand();
+			const picker = await harness.openPicker();
+			const before = picker.render(120).join("\n");
+			assert.match(before, /MCP/);
+			assert.match(before, /mcp__docs {2}2 tools {2}Searches the docs/);
+			assert.match(before, /mcp__docs__search {2}mcp__docs/);
+			picker.handleInput?.(" ");
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 1, disabled: { packages: ["mcp__docs"] } });
+			assert.deepEqual(harness.setActiveCalls.at(-1), []);
+			const after = picker.render(120).join("\n");
+			assert.match(after, /○ mcp__docs/);
+			assert.match(after, /○ mcp__docs__search/);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("an MCP tool registered after session_start is hidden before the next request", async () => {
+	await withAgentDirectory(async (agentDir) => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			writeJson(userConfig(agentDir), { version: 1, disabled: { packages: ["mcp__docs"] } });
+			const harness = createHarness({ cwd, active: ["read"], tools: [tool("read")] });
+			await harness.emit("session_start", { type: "session_start", reason: "startup" });
+			assert.deepEqual(harness.setActiveCalls, [], "nothing changes before the server connects");
+
+			harness.registerTools(mcpTool("mcp__docs__search", "docs"));
+			await harness.emit("before_agent_start", beforeAgentStart([]));
+			assert.deepEqual(harness.setActiveCalls.at(-1), ["read"]);
+			assert.deepEqual(harness.active, ["read"]);
+
+			await harness.runCommand();
+			const picker = await harness.openPicker();
+			assert.match(picker.render(120).join("\n"), /○ mcp__docs/);
+			picker.handleInput?.(" ");
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 1 });
+			assert.deepEqual(harness.setActiveCalls.at(-1), ["read", "mcp__docs__search"]);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("the picker shows a derived description for an observed section", async () => {
+	await withAgentDirectory(async () => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			const harness = createHarness({ cwd });
+			await harness.runCommand();
+			await harness.emit(
+				"context_with_system",
+				contextWithSystem({
+					knowledge_index: "<knowledge_index>\n## Project Knowledge\n\nIndex body",
+					long_section: `<long_section>\n${`word `.repeat(40)}\n</long_section>`,
+				}),
+			);
+			const text = (await harness.openPicker()).render(400).join("\n");
+			assert.match(text, /knowledge_index {2}Project Knowledge/);
+			assert.match(text, /long_section {2}word word/);
+			assert.match(text, /…/);
+			assert.match(text, /docs {2}Pi documentation paths and when to read them/);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("page, home, and end keys move by a page and to the edges", async () => {
+	await withAgentDirectory(async (agentDir) => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			const names = Array.from({ length: 20 }, (_, index) => `tool-${String(index).padStart(2, "0")}`);
+			const harness = createHarness({ cwd, active: names, tools: names.map((name) => tool(name)) });
+			await harness.runCommand();
+			const picker = await harness.openPicker();
+			picker.handleInput?.("tool-");
+			picker.handleInput?.("\x1b[F");
+			picker.handleInput?.(" ");
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 1, disabled: { tools: ["tool-19"] } });
+			picker.handleInput?.("\x1b[H");
+			picker.handleInput?.("\x1b[6~");
+			picker.handleInput?.(" ");
+			assert.deepEqual(readJson(userConfig(agentDir)), {
+				version: 1,
+				disabled: { tools: ["tool-14", "tool-19"] },
+			});
+			picker.handleInput?.("\x1b[5~");
+			picker.handleInput?.(" ");
+			assert.deepEqual(readJson(userConfig(agentDir)), {
+				version: 1,
+				disabled: { tools: ["tool-00", "tool-14", "tool-19"] },
+			});
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
