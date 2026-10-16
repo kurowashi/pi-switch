@@ -488,6 +488,26 @@ test("an untrusted project blocks project toggles", async () => {
 	});
 });
 
+test("the picker keeps the same height on every kind tab", async () => {
+	await withAgentDirectory(async () => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			const harness = createHarness({ cwd, active: ["read"], tools: [tool("read")] });
+			await harness.emit("session_start", START);
+			await harness.runCommand();
+			const picker = await harness.openPicker();
+			const heights = new Set<number>();
+			for (let step = 0; step < 5; step += 1) {
+				heights.add(picker.render(120).length);
+				picker.handleInput?.(KEY.right);
+			}
+			assert.equal(heights.size, 1, "the list area must not shrink on a tab with fewer rows");
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
 test("filtering narrows rows, backspace edits, and escape clears then closes", async () => {
 	await withAgentDirectory(async () => {
 		const cwd = temporaryDirectory("pi-switch-cwd-");

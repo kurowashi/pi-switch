@@ -281,6 +281,10 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 		return truncateToWidth(`${prompt}${filter}`, width);
 	}
 
+	/**
+	 * Always exactly MAX_VISIBLE_ROWS lines. A shorter list is padded with blank lines,
+	 * so switching tabs does not change the picker's height and make it jump.
+	 */
 	function listLines(width: number): string[] {
 		const current = view();
 		const anchor = Math.min(selected, Math.max(0, current.rows.length - 1));
@@ -288,10 +292,14 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 			0,
 			Math.min(anchor - Math.floor(MAX_VISIBLE_ROWS / 2), current.rows.length - MAX_VISIBLE_ROWS),
 		);
-		if (current.rows.length === 0) return [theme.fg("dim", "  nothing here")];
-		return current.rows
-			.slice(start, start + MAX_VISIBLE_ROWS)
-			.map((row, index) => renderRow(row, start + index === anchor, width));
+		const lines =
+			current.rows.length === 0
+				? [theme.fg("dim", "  nothing here")]
+				: current.rows
+						.slice(start, start + MAX_VISIBLE_ROWS)
+						.map((row, index) => renderRow(row, start + index === anchor, width));
+		while (lines.length < MAX_VISIBLE_ROWS) lines.push("");
+		return lines;
 	}
 
 	function renderRow(row: Row, isSelected: boolean, width: number): string {
