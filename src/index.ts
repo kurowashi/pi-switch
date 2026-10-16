@@ -14,23 +14,23 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
 	emptyConfig,
-	layerState,
 	projectConfigPath,
 	type ResolvedConfig,
 	readConfigFile,
 	resolveConfig,
 	type ScopeFile,
-	type ScopeName,
-	type ToggleTarget,
-	toggleInScope,
+	setValue,
 	userConfigPath,
+	valueIn,
 	writeConfigFile,
 } from "./config.ts";
-import { runScopePicker, type ScopeInfo, type ScopePickerDeps } from "./picker.ts";
+import type { ScopeName, ToggleTarget } from "./model.ts";
+import { runScopePicker, type ScopeInfo, type ScopePickerDeps, type SettingChange } from "./picker.ts";
 import {
 	applyToolState,
 	BUILTIN_SECTIONS,
 	collectCatalog,
+	type DefaultOn,
 	filterPromptSections,
 	filterSkills,
 	type SectionEntry,
@@ -46,8 +46,10 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 	let userFile: ScopeFile = { path: userConfigPath(agentDir), config: emptyConfig(), malformed: false };
 	let projectFile: ScopeFile | undefined;
 	let resolved: ResolvedConfig = resolveConfig(userFile.config, undefined);
-	/** Tools removed because the config disables them, so enabling restores them. */
+	/** Tools pi-switch removed because the config turned them off; inheriting them again restores Pi's default. */
 	let hiddenTools: string[] = [];
+	/** Whether Pi had each tool active before pi-switch first touched it in this session. */
+	let toolDefaults = new Map<string, boolean>();
 	/** Registered tool names at the last application, to notice late registrations. */
 	let knownTools: string[] = [];
 	const warned = new Set<string>();
@@ -68,10 +70,16 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 		}
 	}
 
+	/** Pi's own state for an unset target: the tool's state at first sight, every other kind is on. */
+	const defaultOn: DefaultOn = (target) => (target.kind === "tools" ? (toolDefaults.get(target.name) ?? true) : true);
+
 	function applyTools(): void {
 		const tools = pi.getAllTools();
 		const current = pi.getActiveTools();
-		const state = applyToolState(current, hiddenTools, tools, resolved);
+		for (const tool of tools) {
+			if (!toolDefaults.has(tool.name)) toolDefaults.set(tool.name, current.includes(tool.name));
+		}
+		const state = applyToolState(current, hiddenTools, tools, resolved, defaultOn);
 		hiddenTools = state.hidden;
 		knownTools = tools.map((tool) => tool.name);
 		if (sameNames(state.active, current)) return;
@@ -84,26 +92,13 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 		return !sameNames(names, knownTools);
 	}
 
-	/** Global enable cannot beat a project disable; say so instead of leaving the user guessing. */
-	function notifyIfIneffective(ctx: ExtensionCommandContext, scope: ScopeName, targets: readonly ToggleTarget[]): void {
-		if (scope !== "user") return;
-		const blocked = targets.filter((target) => resolved.isDisabled(target));
-		if (blocked.length === 0) return;
-		const names = blocked.map((target) => target.name).join(", ");
-		ctx.ui.notify(`pi-switch: enabled globally, but the project config keeps these disabled here: ${names}`, "warning");
-	}
-
-	function toggle(
-		ctx: ExtensionCommandContext,
-		scope: ScopeName,
-		targets: readonly ToggleTarget[],
-		enabled: boolean,
-	): void {
+	/** Persist the changes in one write, then apply them to the live session. */
+	function apply(ctx: ExtensionCommandContext, scope: ScopeName, changes: readonly SettingChange[]): void {
 		// Re-read both files so an edit made while the picker was open is not clobbered.
 		reload(ctx);
 		const file = writableFile(ctx, scope);
 		if (file === undefined) return;
-		for (const target of targets) toggleInScope(userFile.config, projectFile?.config, scope, target, enabled);
+		for (const change of changes) setValue(file.config, change.target, change.setting);
 		try {
 			writeConfigFile(file);
 		} catch (error) {
@@ -112,7 +107,6 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 		}
 		resolved = resolveConfig(userFile.config, projectFile?.config);
 		applyTools();
-		if (enabled) notifyIfIneffective(ctx, scope, targets);
 	}
 
 	function writableFile(ctx: ExtensionCommandContext, scope: ScopeName): ScopeFile | undefined {
@@ -149,11 +143,11 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 		return {
 			catalog: () => collectCatalog(pi.getAllTools(), ctx.getSystemPromptOptions().skills ?? [], sectionEntries()),
 			resolved: () => resolved,
+			defaultOn,
 			scopes,
-			layerState: (scope: ScopeName, target: ToggleTarget) =>
-				layerState(scope === "user" ? userFile.config : projectFile?.config, target),
-			toggle: (scope: ScopeName, targets: readonly ToggleTarget[], enabled: boolean) =>
-				toggle(ctx, scope, targets, enabled),
+			valueOf: (scope: ScopeName, target: ToggleTarget) =>
+				valueIn(scope === "user" ? userFile.config : projectFile?.config, target),
+			apply: (scope: ScopeName, changes: readonly SettingChange[]) => apply(ctx, scope, changes),
 			notify: (message: string, type?: "info" | "warning" | "error") => ctx.ui.notify(message, type),
 		};
 	}
@@ -162,11 +156,12 @@ export default function scopeExtension(pi: ExtensionAPI): void {
 		reload(ctx);
 		warnMalformed(ctx);
 		hiddenTools = [];
+		toolDefaults = new Map();
 		applyTools();
 	});
 
 	pi.on("before_agent_start", (event) => {
-		// MCP servers connect after session_start; apply their disabled state before this request.
+		// MCP servers connect after session_start; apply their off state before this request.
 		if (toolsChanged()) applyTools();
 		event.systemPromptOptions.skills = filterSkills(event.systemPromptOptions.skills, resolved);
 	});

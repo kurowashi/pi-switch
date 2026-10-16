@@ -14,7 +14,14 @@
 
 import type { SystemMessage } from "@earendil-works/pi-ai";
 import type { Skill, SourceInfo, ToolExposure, ToolInfo } from "@earendil-works/pi-coding-agent";
-import type { ResolvedConfig, ToggleTarget } from "./config.ts";
+import type { ResolvedConfig } from "./config.ts";
+import type { ToggleTarget, Value } from "./model.ts";
+
+/**
+ * The state Pi gives a target that no config file sets. Tools use the state they
+ * had when pi-switch first saw them; skills and sections are always on.
+ */
+export type DefaultOn = (target: ToggleTarget) => boolean;
 
 type ItemKind = "tool" | "skill" | "section";
 
@@ -135,7 +142,7 @@ export function filterPromptSections(current: SystemMessage, resolved: ResolvedC
 	let removed = false;
 	for (const [name, text] of Object.entries(sections)) {
 		if (text === null) continue;
-		if (resolved.isDisabled({ kind: "sections", name })) {
+		if (isExplicitlyOff(resolved, { kind: "sections", name })) {
 			removed = true;
 			continue;
 		}
@@ -146,62 +153,86 @@ export function filterPromptSections(current: SystemMessage, resolved: ResolvedC
 	return { ...current, sections: kept };
 }
 
-export function itemDisabled(resolved: ResolvedConfig, item: CatalogItem): boolean {
-	return resolved.isDisabled(itemTarget(item));
+/** The effective state of one target: the config value when a file sets it, otherwise the default. */
+export function isOn(resolved: ResolvedConfig, target: ToggleTarget, defaultOn: DefaultOn): boolean {
+	const value = resolved.resolve(target).value;
+	if (value === undefined) return defaultOn(target);
+	return value === "on";
 }
 
-export function packageDisabled(resolved: ResolvedConfig, name: string): boolean {
-	return resolved.isDisabled({ kind: "packages", name });
+/** Only an explicit `off` removes a prompt section or a skill; an unset one stays as Pi built it. */
+function isExplicitlyOff(resolved: ResolvedConfig, target: ToggleTarget): boolean {
+	return resolved.resolve(target).value === "off";
+}
+
+export function itemOn(resolved: ResolvedConfig, item: CatalogItem, defaultOn: DefaultOn): boolean {
+	return isOn(resolved, itemTarget(item), defaultOn);
 }
 
 export function filterSkills(skills: readonly Skill[], resolved: ResolvedConfig): Skill[] {
-	return skills.filter((skill) => !resolved.isDisabled(targetFor("skills", skill.name, skill.sourceInfo)));
+	return skills.filter((skill) => !isExplicitlyOff(resolved, targetFor("skills", skill.name, skill.sourceInfo)));
 }
 
 export interface ToolState {
 	/** Names to pass to `setActiveTools`. */
 	active: string[];
-	/** Tool names removed because the config disables them, kept so enabling restores them. */
+	/** Tools pi-switch removed, kept so that inheriting them again restores Pi's default. */
 	hidden: string[];
 }
 
 /**
- * Reconcile the active tool set with the resolved configuration.
+ * Reconcile the active tool set with the config.
  *
- * The current set is the base: tools Pi activated after the session started
- * (MCP servers connect late) keep their state unless the config disables them.
- * Removed names are remembered in `hidden` so enabling them again restores
- * them, even when the session transcript no longer carries them.
+ * `off` removes a tool and `on` adds it, even when Pi started it inactive. An
+ * unset tool is left as it is, except that a tool pi-switch removed earlier comes
+ * back when Pi's default is on. Tools Pi activated after the session started
+ * (MCP servers connect late) keep their state unless the config says otherwise.
  */
 export function applyToolState(
 	current: readonly string[],
 	hidden: readonly string[],
 	tools: readonly ToolInfo[],
 	resolved: ResolvedConfig,
+	defaultOn: DefaultOn,
 ): ToolState {
-	const byName = new Map(tools.map((tool) => [tool.name, tool]));
-	const hiddenSet = new Set(hidden);
+	const active = new Set(current);
+	const removed = new Set(hidden);
 	for (const tool of tools) {
-		if (isDeclarable(tool) && resolved.isDisabled(toolTarget(tool))) hiddenSet.add(tool.name);
-	}
-	const active = new Set<string>();
-	for (const name of current) {
-		const tool = byName.get(name);
-		if (tool !== undefined && resolved.isDisabled(toolTarget(tool))) continue;
-		active.add(name);
-	}
-	for (const name of [...hiddenSet]) {
-		const tool = byName.get(name);
-		if (tool === undefined || !isDeclarable(tool) || resolved.isDisabled(toolTarget(tool))) continue;
-		hiddenSet.delete(name);
-		active.add(name);
+		if (!isDeclarable(tool)) continue;
+		applyOne(tool, resolved.resolve(toolTarget(tool)).value, defaultOn, active, removed);
 	}
 	// Drop names that unregistered or changed to a non-declarable exposure: they cannot be restored.
-	const restorable = [...hiddenSet].filter((name) => {
-		const tool = byName.get(name);
+	const restorable = [...removed].filter((name) => {
+		const tool = tools.find((candidate) => candidate.name === name);
 		return tool !== undefined && isDeclarable(tool);
 	});
 	return { active: orderedNames(tools, current, active), hidden: restorable };
+}
+
+/** Move one tool to the state its value (or Pi's default) asks for; `active` and `removed` are updated in place. */
+function applyOne(
+	tool: ToolInfo,
+	value: Value | undefined,
+	defaultOn: DefaultOn,
+	active: Set<string>,
+	removed: Set<string>,
+): void {
+	const target = toolTarget(tool);
+	if (value === "off") {
+		active.delete(tool.name);
+		removed.add(tool.name);
+		return;
+	}
+	if (value === "on") {
+		active.add(tool.name);
+		removed.delete(tool.name);
+		return;
+	}
+	if (removed.has(tool.name)) {
+		// Inherit again: pi-switch stops managing the tool and Pi's default applies.
+		removed.delete(tool.name);
+		if (defaultOn(target)) active.add(tool.name);
+	}
 }
 
 /** Registered tools first in registration order, then names the catalog does not know. */
@@ -213,17 +244,28 @@ function orderedNames(tools: readonly ToolInfo[], current: readonly string[], ac
 	return [...order.keys()].filter((name) => active.has(name));
 }
 
-export function packageState(catalog: Catalog, resolved: ResolvedConfig, name: string): PackageState {
+/** The tools and skills a package or MCP group owns, as toggle targets. */
+export function packageChildren(catalog: Catalog, name: string): ToggleTarget[] {
 	const entry = catalog.packages.find((candidate) => candidate.name === name);
-	if (entry === undefined) return packageDisabled(resolved, name) ? "off" : "on";
-	const targets: ToggleTarget[] = [
+	if (entry === undefined) return [];
+	return [
 		...entry.tools.map((tool) => withPackage({ kind: "tools" as const, name: tool }, name)),
 		...entry.skills.map((skill) => withPackage({ kind: "skills" as const, name: skill }, name)),
 	];
-	if (targets.length === 0) return packageDisabled(resolved, name) ? "off" : "on";
-	const disabled = targets.filter((target) => resolved.isDisabled(target)).length;
-	if (disabled === 0) return "on";
-	if (disabled === targets.length) return "off";
+}
+
+/** A package row is on or off when all its children agree; mixed children show as partial. */
+export function packageState(
+	catalog: Catalog,
+	resolved: ResolvedConfig,
+	name: string,
+	defaultOn: DefaultOn,
+): PackageState {
+	const targets = packageChildren(catalog, name);
+	if (targets.length === 0) return isOn(resolved, { kind: "packages", name }, defaultOn) ? "on" : "off";
+	const on = targets.filter((target) => isOn(resolved, target, defaultOn)).length;
+	if (on === targets.length) return "on";
+	if (on === 0) return "off";
 	return "partial";
 }
 

@@ -2,7 +2,8 @@
  * Unit: resource discovery, package and MCP grouping, and effective filtering.
  *
  * The catalog is what the picker shows; the filters and the tool-state
- * reconciliation are what the model sees. All are pure functions, so the rules
+ * reconciliation are what the model sees. Unset targets fall back to a default
+ * that the caller supplies (Pi's own state). All are pure functions, so the rules
  * in README.md#動作 stay testable without a running Pi session.
  */
 
@@ -10,16 +11,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { SystemMessage } from "@earendil-works/pi-ai";
 import type { Skill, SourceInfo, ToolInfo } from "@earendil-works/pi-coding-agent";
-import { emptyConfig, parseConfig, resolveConfig } from "../../src/config.ts";
+import { parseConfig, resolveConfig } from "../../src/config.ts";
 import {
 	applyToolState,
 	BUILTIN_SECTIONS,
 	collectCatalog,
+	type DefaultOn,
 	filterPromptSections,
 	filterSkills,
-	itemDisabled,
+	isOn,
+	itemOn,
 	itemTarget,
-	packageDisabled,
+	packageChildren,
 	packageKeyFromSource,
 	packageState,
 	toolTarget,
@@ -72,70 +75,28 @@ function skill(name: string, sourceInfo: SourceInfo = source()): Skill {
 const PACKAGE_SOURCE = (name: string) =>
 	source({ source: `npm:${name}@1.2.3`, origin: "package", baseDir: `/tmp/${name}` });
 
+/** Pi's default: every target is on unless the test says otherwise. */
+const ALL_ON: DefaultOn = () => true;
+
+/** Pi's default for tools that started inactive, such as `grep`. */
+const offByDefault =
+	(names: readonly string[]): DefaultOn =>
+	(target) =>
+		!(target.kind === "tools" && names.includes(target.name));
+
 function parse(text: string) {
 	const parsed = parseConfig(text);
 	assert.ok(parsed.ok, `config must parse: ${text}`);
 	return resolveConfig(parsed.config, undefined);
 }
 
-test("packageKeyFromSource drops npm versions but keeps scoped names", () => {
-	assert.equal(packageKeyFromSource("npm:pi-exa@1.2.3"), "npm:pi-exa");
-	assert.equal(packageKeyFromSource("npm:@scope/pkg@0.0.1"), "npm:@scope/pkg");
-	assert.equal(packageKeyFromSource("npm:pi-exa"), "npm:pi-exa");
-	assert.equal(packageKeyFromSource("npm:@scope/pkg"), "npm:@scope/pkg");
-	assert.equal(packageKeyFromSource("git:github.com/user/repo"), "git:github.com/user/repo");
-});
-
-test("collectCatalog groups packaged tools and skills and skips hidden tools", () => {
-	const catalog = collectCatalog(
-		[
-			tool("exa_search", PACKAGE_SOURCE("pi-exa")),
-			tool("hidden_tool", PACKAGE_SOURCE("pi-exa"), "hidden"),
-			tool("read"),
-		],
-		[skill("knowledge", PACKAGE_SOURCE("pi-knowledge")), skill("local-skill")],
-	);
-	assert.deepEqual(
-		catalog.items.map((item) => `${item.kind}:${item.name}:${item.packageName ?? "-"}`),
-		["tool:exa_search:npm:pi-exa", "tool:read:-", "skill:knowledge:npm:pi-knowledge", "skill:local-skill:-"],
-	);
-	assert.deepEqual(catalog.packages, [
-		{ name: "npm:pi-exa", kind: "package", tools: ["exa_search"], skills: [] },
-		{ name: "npm:pi-knowledge", kind: "package", tools: [], skills: ["knowledge"] },
-	]);
-});
-
-test("collectCatalog groups MCP tools by namespace and keeps the server description", () => {
-	const catalog = collectCatalog(
-		[
-			mcpTool("mcp__docs__search", "docs", "Searches the docs"),
-			mcpTool("mcp__docs__read", "docs"),
-			tool("mcp__odd__tool", source(), "hidden"),
-			tool("loose"),
-		],
-		[],
-	);
-	assert.deepEqual(
-		catalog.items.map((item) => `${item.kind}:${item.name}:${item.packageName ?? "-"}`),
-		["tool:mcp__docs__search:mcp__docs", "tool:mcp__docs__read:mcp__docs", "tool:loose:-"],
-	);
-	assert.deepEqual(catalog.packages, [
-		{
-			name: "mcp__docs",
-			kind: "mcp",
-			description: "Searches the docs",
-			tools: ["mcp__docs__search", "mcp__docs__read"],
-			skills: [],
-		},
-	]);
-});
-
-test("a namespace without the MCP prefix is not a group", () => {
-	const namespaced = { ...tool("namespaced"), namespace: { name: "other" } } as ToolInfo;
-	const catalog = collectCatalog([namespaced], []);
-	assert.deepEqual(catalog.packages, []);
-	assert.equal(catalog.items[0]?.packageName, undefined);
-});
+function parseLayers(user: string, project?: string) {
+	const u = parseConfig(user);
+	assert.ok(u.ok);
+	const p = project === undefined ? undefined : parseConfig(project);
+	if (p !== undefined) assert.ok(p.ok);
+	return resolveConfig(u.config, p?.ok ? p.config : undefined);
+}
 
 test("itemTarget carries the package or MCP group only for grouped resources", () => {
 	const [packaged, mcp, local] = collectCatalog(
@@ -158,31 +119,50 @@ test("toolTarget resolves the package or MCP group of a live tool", () => {
 	assert.deepEqual(toolTarget(tool("c")), { kind: "tools", name: "c" });
 });
 
-test("itemDisabled resolves through the owning package or MCP group", () => {
-	const resolved = parse('{"disabled":{"packages":["npm:pi-exa","mcp__docs"]}}');
+test("isOn uses the config value when set and the default otherwise", () => {
+	const resolved = parse('{"version":2,"tools":{"off":"off","on":"on"}}');
+	const defaults = offByDefault(["grep"]);
+	assert.equal(isOn(resolved, { kind: "tools", name: "off" }, ALL_ON), false);
+	assert.equal(isOn(resolved, { kind: "tools", name: "on" }, offByDefault(["on"])), true);
+	assert.equal(isOn(resolved, { kind: "tools", name: "grep" }, defaults), false, "an unset tool shows Pi's default");
+	assert.equal(isOn(resolved, { kind: "tools", name: "read" }, defaults), true);
+});
+
+test("itemOn resolves through the owning package or MCP group", () => {
+	const resolved = parse('{"version":2,"packages":{"npm:pi-exa":"off","mcp__docs":"off"}}');
 	const [packaged, mcp, loose] = collectCatalog(
 		[tool("a", PACKAGE_SOURCE("pi-exa")), mcpTool("b", "docs"), tool("c")],
 		[],
 	).items;
 	assert.ok(packaged !== undefined && mcp !== undefined && loose !== undefined);
-	assert.equal(itemDisabled(resolved, packaged), true);
-	assert.equal(itemDisabled(resolved, mcp), true);
-	assert.equal(itemDisabled(resolved, loose), false);
+	assert.equal(itemOn(resolved, packaged, ALL_ON), false);
+	assert.equal(itemOn(resolved, mcp, ALL_ON), false);
+	assert.equal(itemOn(resolved, loose, ALL_ON), true);
 });
 
 test("an individually enabled MCP tool beats the disabled group", () => {
-	const resolved = parse('{"disabled":{"packages":["mcp__docs"]},"enabled":{"tools":["mcp__docs__read"]}}');
+	const resolved = parse('{"version":2,"packages":{"mcp__docs":"off"},"tools":{"mcp__docs__read":"on"}}');
 	const [search, read] = collectCatalog(
 		[mcpTool("mcp__docs__search", "docs"), mcpTool("mcp__docs__read", "docs")],
 		[],
 	).items;
 	assert.ok(search !== undefined && read !== undefined);
-	assert.equal(itemDisabled(resolved, search), true);
-	assert.equal(itemDisabled(resolved, read), false);
+	assert.equal(itemOn(resolved, search, ALL_ON), false);
+	assert.equal(itemOn(resolved, read, ALL_ON), true);
 });
 
-test("filterSkills removes disabled skills and keeps the rest", () => {
-	const resolved = parse('{"disabled":{"skills":["keep-off"],"packages":["npm:pi-knowledge"]}}');
+test("a project file overrides the user's package for a child item", () => {
+	const resolved = parseLayers(
+		'{"version":2,"packages":{"npm:pi-exa":"off"}}',
+		'{"version":2,"tools":{"exa_search":"on"}}',
+	);
+	const [exa] = collectCatalog([tool("exa_search", PACKAGE_SOURCE("pi-exa"))], []).items;
+	assert.ok(exa !== undefined);
+	assert.equal(itemOn(resolved, exa, ALL_ON), true);
+});
+
+test("filterSkills removes explicitly off skills and keeps unset ones", () => {
+	const resolved = parse('{"version":2,"skills":{"keep-off":"off"},"packages":{"npm:pi-knowledge":"off"}}');
 	const kept = filterSkills(
 		[skill("keep-off"), skill("knowledge", PACKAGE_SOURCE("pi-knowledge")), skill("keep-on")],
 		resolved,
@@ -193,82 +173,132 @@ test("filterSkills removes disabled skills and keeps the rest", () => {
 	);
 });
 
-test("applyToolState removes disabled tools and remembers them for re-enabling", () => {
-	const off = parse('{"disabled":{"tools":["off"]}}');
-	const disabled = applyToolState(["on", "off"], [], [tool("on"), tool("off")], off);
+test("filterSkills keeps a skill the config explicitly turns on, even inside an off package", () => {
+	const resolved = parse('{"version":2,"packages":{"npm:pi-knowledge":"off"},"skills":{"knowledge":"on"}}');
+	const kept = filterSkills([skill("knowledge", PACKAGE_SOURCE("pi-knowledge"))], resolved);
+	assert.equal(kept.length, 1);
+});
+
+test("applyToolState removes off tools and remembers them for re-enabling", () => {
+	const off = parse('{"version":2,"tools":{"off":"off"}}');
+	const disabled = applyToolState(["on", "off"], [], [tool("on"), tool("off")], off, ALL_ON);
 	assert.deepEqual(disabled, { active: ["on"], hidden: ["off"] });
-	const on = applyToolState(disabled.active, disabled.hidden, [tool("on"), tool("off")], parse("{}"));
-	assert.deepEqual(on, { active: ["on", "off"], hidden: [] });
+	const inherit = applyToolState(disabled.active, disabled.hidden, [tool("on"), tool("off")], parse("{}"), ALL_ON);
+	assert.deepEqual(inherit, { active: ["on", "off"], hidden: [] });
+});
+
+test("an on value adds a tool Pi started inactive", () => {
+	const grep = parse('{"version":2,"tools":{"grep":"on"}}');
+	const state = applyToolState([], [], [tool("grep")], grep, offByDefault(["grep"]));
+	assert.deepEqual(state, { active: ["grep"], hidden: [] });
+});
+
+test("an unset tool Pi started inactive stays inactive", () => {
+	const state = applyToolState(["read"], [], [tool("read"), tool("grep")], parse("{}"), offByDefault(["grep"]));
+	assert.deepEqual(state, { active: ["read"], hidden: [] });
+});
+
+test("inheriting a tool pi-switch removed restores Pi's default, not a blanket on", () => {
+	const removed = applyToolState(
+		["grep", "read"],
+		[],
+		[tool("grep"), tool("read")],
+		parse('{"version":2,"tools":{"grep":"off"}}'),
+		offByDefault(["grep"]),
+	);
+	assert.deepEqual(removed, { active: ["read"], hidden: ["grep"] });
+	const restored = applyToolState(
+		removed.active,
+		removed.hidden,
+		[tool("grep"), tool("read")],
+		parse("{}"),
+		offByDefault(["grep"]),
+	);
+	assert.deepEqual(restored, { active: ["read"], hidden: [] }, "grep was off by default, so it stays off");
+	assert.deepEqual(restored.hidden, [], "inheriting ends pi-switch's control of the tool");
 });
 
 test("applyToolState keeps tools registered after the session started", () => {
-	const state = applyToolState(["known", "late"], [], [tool("known"), tool("late"), tool("not-active")], parse("{}"));
+	const state = applyToolState(
+		["known", "late"],
+		[],
+		[tool("known"), tool("late"), tool("not-active")],
+		parse("{}"),
+		ALL_ON,
+	);
 	assert.deepEqual(state, { active: ["known", "late"], hidden: [] });
 });
 
-test("applyToolState hides a disabled MCP group and restores it when enabled", () => {
+test("applyToolState hides an off MCP group and restores it when inherited", () => {
 	const tools = [mcpTool("mcp__docs__a", "docs"), mcpTool("mcp__docs__b", "docs"), tool("other")];
 	const disabled = applyToolState(
 		["mcp__docs__a", "mcp__docs__b", "other"],
 		[],
 		tools,
-		parse('{"disabled":{"packages":["mcp__docs"]}}'),
+		parse('{"version":2,"packages":{"mcp__docs":"off"}}'),
+		ALL_ON,
 	);
 	assert.deepEqual(disabled, { active: ["other"], hidden: ["mcp__docs__a", "mcp__docs__b"] });
-	const restored = applyToolState(disabled.active, disabled.hidden, tools, parse("{}"));
+	const restored = applyToolState(disabled.active, disabled.hidden, tools, parse("{}"), ALL_ON);
 	assert.deepEqual(restored, { active: ["mcp__docs__a", "mcp__docs__b", "other"], hidden: [] });
 });
 
 test("applyToolState keeps unknown names and drops non-declarable tools from hidden", () => {
 	const deferred = tool("deferred-off", source(), "deferred");
-	const state = applyToolState(["ghost", "deferred"], ["deferred-off"], [deferred], parse("{}"));
+	const state = applyToolState(["ghost", "deferred"], ["deferred-off"], [deferred], parse("{}"), ALL_ON);
 	assert.deepEqual(state, { active: ["ghost", "deferred"], hidden: [] });
 });
 
-test("applyToolState restores a disabled tool that was not active yet", () => {
-	const off = parse('{"disabled":{"tools":["x"]}}');
-	const disabled = applyToolState([], [], [tool("x")], off);
+test("applyToolState restores a removed tool that was not active yet", () => {
+	const off = parse('{"version":2,"tools":{"x":"off"}}');
+	const disabled = applyToolState([], [], [tool("x")], off, ALL_ON);
 	assert.deepEqual(disabled, { active: [], hidden: ["x"] });
-	const on = applyToolState(disabled.active, disabled.hidden, [tool("x")], parse("{}"));
+	const on = applyToolState(disabled.active, disabled.hidden, [tool("x")], parse("{}"), ALL_ON);
 	assert.deepEqual(on, { active: ["x"], hidden: [] });
 });
 
+test("packageChildren lists the tools and skills of one package", () => {
+	const catalog = collectCatalog([tool("a", PACKAGE_SOURCE("pi-exa"))], [skill("knowledge", PACKAGE_SOURCE("pi-exa"))]);
+	assert.deepEqual(packageChildren(catalog, "npm:pi-exa"), [
+		{ kind: "tools", name: "a", packageName: "npm:pi-exa" },
+		{ kind: "skills", name: "knowledge", packageName: "npm:pi-exa" },
+	]);
+});
+
 test("packageState aggregates children and handles empty and unknown packages", () => {
-	const catalog = collectCatalog(
-		[
-			tool("a", PACKAGE_SOURCE("pi-exa")),
-			tool("b", PACKAGE_SOURCE("pi-exa")),
-			tool("c", PACKAGE_SOURCE("pi-knowledge"), "hidden"),
-		],
-		[skill("knowledge", PACKAGE_SOURCE("pi-knowledge"))],
+	const catalog = collectCatalog([tool("a", PACKAGE_SOURCE("pi-exa")), tool("b", PACKAGE_SOURCE("pi-exa"))], []);
+	assert.equal(packageState(catalog, parse("{}"), "npm:pi-exa", ALL_ON), "on");
+	assert.equal(packageState(catalog, parse("{}"), "npm:unknown", ALL_ON), "on", "an unknown package is on by default");
+	assert.equal(packageState(catalog, parse('{"version":2,"tools":{"a":"off"}}'), "npm:pi-exa", ALL_ON), "partial");
+	assert.equal(
+		packageState(catalog, parse('{"version":2,"packages":{"npm:pi-exa":"off"}}'), "npm:pi-exa", ALL_ON),
+		"off",
 	);
-	const allOn = resolveConfig(emptyConfig(), undefined);
-	assert.equal(packageState(catalog, allOn, "npm:pi-exa"), "on");
-	assert.equal(packageState(catalog, allOn, "npm:pi-knowledge"), "on");
-	assert.equal(packageState(catalog, allOn, "npm:unknown"), "on");
-
-	const oneOff = parseConfig('{"disabled":{"tools":["a"]}}');
-	assert.ok(oneOff.ok);
-	assert.equal(packageState(catalog, resolveConfig(oneOff.config, undefined), "npm:pi-exa"), "partial");
-
-	const allOff = parseConfig('{"disabled":{"packages":["npm:pi-exa"]},"enabled":{"skills":["knowledge"]}}');
-	assert.ok(allOff.ok);
-	const resolvedOff = resolveConfig(allOff.config, undefined);
-	assert.equal(packageState(catalog, resolvedOff, "npm:pi-exa"), "off");
-	assert.equal(packageState(catalog, resolvedOff, "npm:unknown"), "on");
+	assert.equal(
+		packageState(catalog, parse('{"version":2,"packages":{"npm:pi-exa":"on"}}'), "npm:pi-exa", offByDefault(["a"])),
+		"on",
+	);
 });
 
 test("packageState aggregates an MCP group", () => {
 	const catalog = collectCatalog([mcpTool("mcp__docs__a", "docs"), mcpTool("mcp__docs__b", "docs")], []);
-	assert.equal(packageState(catalog, parse("{}"), "mcp__docs"), "on");
-	assert.equal(packageState(catalog, parse('{"disabled":{"tools":["mcp__docs__a"]}}'), "mcp__docs"), "partial");
-	assert.equal(packageState(catalog, parse('{"disabled":{"packages":["mcp__docs"]}}'), "mcp__docs"), "off");
+	assert.equal(packageState(catalog, parse("{}"), "mcp__docs", ALL_ON), "on");
+	assert.equal(
+		packageState(catalog, parse('{"version":2,"tools":{"mcp__docs__a":"off"}}'), "mcp__docs", ALL_ON),
+		"partial",
+	);
+	assert.equal(
+		packageState(catalog, parse('{"version":2,"packages":{"mcp__docs":"off"}}'), "mcp__docs", ALL_ON),
+		"off",
+	);
 });
 
-test("packageDisabled reads the package list directly", () => {
-	const resolved = parse('{"disabled":{"packages":["npm:pi-exa"]}}');
-	assert.equal(packageDisabled(resolved, "npm:pi-exa"), true);
-	assert.equal(packageDisabled(resolved, "npm:pi-knowledge"), false);
+test("packageKeyFromSource drops npm versions but keeps scoped names", () => {
+	assert.equal(packageKeyFromSource("npm:pi-exa@1.2.3"), "npm:pi-exa");
+	assert.equal(packageKeyFromSource("npm:@scope/pkg@0.0.1"), "npm:@scope/pkg");
+	assert.equal(packageKeyFromSource("npm:pi-exa"), "npm:pi-exa");
+	assert.equal(packageKeyFromSource("npm:@scope/pkg"), "npm:@scope/pkg");
+	assert.equal(packageKeyFromSource("git:github.com/user/repo"), "git:github.com/user/repo");
 });
 
 test("BUILTIN_SECTIONS pins the sections Pi builds by default and describes them", () => {
@@ -298,8 +328,8 @@ test("collectCatalog appends section items without a package and itemTarget maps
 	assert.deepEqual(itemTarget(docs), { kind: "sections", name: "docs" });
 });
 
-test("itemDisabled resolves section names", () => {
-	const resolved = parse('{"sections":{"disabled":["docs"]}}');
+test("itemOn resolves section names", () => {
+	const resolved = parse('{"version":2,"sections":{"docs":"off"}}');
 	const catalog = collectCatalog(
 		[],
 		[],
@@ -310,16 +340,16 @@ test("itemDisabled resolves section names", () => {
 	);
 	const [docs, rules] = catalog.items;
 	assert.ok(docs !== undefined && rules !== undefined);
-	assert.equal(itemDisabled(resolved, docs), true);
-	assert.equal(itemDisabled(resolved, rules), false);
+	assert.equal(itemOn(resolved, docs, ALL_ON), false);
+	assert.equal(itemOn(resolved, rules, ALL_ON), true);
 });
 
 function systemMessage(partial: Partial<SystemMessage> = {}): SystemMessage {
 	return { role: "system", content: "", timestamp: 0, ...partial };
 }
 
-test("filterPromptSections removes disabled sections and keeps the rest", () => {
-	const resolved = parse('{"sections":{"disabled":["docs"]}}');
+test("filterPromptSections removes off sections and keeps the rest", () => {
+	const resolved = parse('{"version":2,"sections":{"docs":"off"}}');
 	const toolsAdded = [{ name: "read" }] as unknown as NonNullable<SystemMessage["toolsAdded"]>;
 	const current = systemMessage({
 		content: "base",
@@ -335,14 +365,14 @@ test("filterPromptSections removes disabled sections and keeps the rest", () => 
 	assert.equal(head.timestamp, 7);
 });
 
-test("filterPromptSections leaves an unaffected or forced prompt alone", () => {
-	const resolved = parse('{"sections":{"disabled":["docs"]}}');
+test("filterPromptSections keeps an on section and leaves an unaffected or forced prompt alone", () => {
+	const resolved = parse('{"version":2,"sections":{"docs":"off","rules":"on"}}');
 	assert.equal(filterPromptSections(systemMessage({ sections: { rules: "R" } }), resolved), undefined);
 	assert.equal(filterPromptSections(systemMessage({ content: "forced" }), resolved), undefined);
 });
 
 test("filterPromptSections ignores null section entries", () => {
-	const resolved = parse('{"sections":{"disabled":["docs"]}}');
+	const resolved = parse('{"version":2,"sections":{"docs":"off"}}');
 	assert.equal(
 		filterPromptSections(systemMessage({ sections: { docs: null } }), resolved),
 		undefined,
@@ -350,10 +380,10 @@ test("filterPromptSections ignores null section entries", () => {
 	);
 });
 
-test("filterPromptSections empties the sections key when everything is disabled", () => {
+test("filterPromptSections empties the sections key when everything is off", () => {
 	const head = filterPromptSections(
 		systemMessage({ content: "base", sections: { docs: "D", rules: "R" } }),
-		parse('{"sections":{"disabled":["docs","rules"]}}'),
+		parse('{"version":2,"sections":{"docs":"off","rules":"off"}}'),
 	);
 	assert.ok(head !== undefined);
 	assert.deepEqual(head.sections, {});

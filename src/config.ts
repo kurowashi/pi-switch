@@ -1,53 +1,36 @@
 /**
  * pi-switch configuration: where the two files live, how they are parsed,
- * merged into an effective state, and written back.
+ * resolved into an effective on/off state, and written back.
  *
- * The user file is `<agent dir>/pi-switch.json`; the project file is
- * `<cwd>/.pi/pi-switch.json` and is read and written only in trusted projects.
- * A target is disabled when a layer disables it and no later layer enables it.
- * Layers apply in order, user then project, and inside a layer the enabled list
- * wins over the disabled list. Targets that no list mentions stay enabled.
- * Prompt sections live in the top-level `sections` key instead of the
- * `disabled` / `enabled` maps, so older versions keep the file valid as an
- * unknown top-level field. See README.md#設定 for the user-facing description.
+ * Each file holds explicit values, `on` or `off`, per target. A target without
+ * a value inherits. The project file wins over the user file. Inside one file
+ * an item's value wins over its package's value. A target that no file sets
+ * has no value here; the caller decides its default. See README.md#設定 and
+ * docs/adr/0007-tri-state-values-and-project-precedence.md.
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { parseLegacyV1 } from "./legacy-v1.ts";
+import {
+	emptyValues,
+	RESOURCE_KINDS,
+	type ScopeName,
+	type Setting,
+	type ToggleTarget,
+	type Value,
+	type Values,
+} from "./model.ts";
 
 export const CONFIG_FILE_NAME = "pi-switch.json";
-const CONFIG_VERSION = 1;
+const CONFIG_VERSION = 2;
 
-export type ResourceKind = "tools" | "skills" | "packages" | "sections";
-export type ScopeName = "user" | "project";
-
-/** Kinds stored inside the `disabled` / `enabled` maps; sections have their own key. */
-type DiskKind = Exclude<ResourceKind, "sections">;
-
-const DISK_KINDS: readonly DiskKind[] = ["tools", "skills", "packages"];
-const RESOURCE_KINDS: readonly ResourceKind[] = [...DISK_KINDS, "sections"];
-
-/** A tool, a skill, or a whole package. */
-export interface ToggleTarget {
-	kind: ResourceKind;
-	name: string;
-	/** Normalized package key when a package owns the tool or skill. */
-	packageName?: string;
-}
-
-/** One file's lists, keyed by resource kind. */
-type Lists = Record<"disabled" | "enabled", Record<ResourceKind, string[]>>;
-
-export interface ScopeConfig extends Lists {
+export interface ScopeConfig {
 	version: number;
+	values: Values;
 	/** Unknown top-level fields, preserved when the file is rewritten. */
 	extra: Record<string, unknown>;
-}
-
-interface SectionLists {
-	disabled: string[];
-	enabled: string[];
 }
 
 export interface ScopeFile {
@@ -59,11 +42,17 @@ export interface ScopeFile {
 
 export type ParseResult = { ok: true; config: ScopeConfig } | { ok: false; error: string };
 
-export interface ResolvedConfig {
-	isDisabled(target: ToggleTarget): boolean;
+/** The value that decides a target, and where it came from. `value` is undefined when no file sets it. */
+interface Resolution {
+	value?: Value;
+	scope?: ScopeName;
+	/** `package` when the target's package entry decided, `entry` when the target's own entry did. */
+	via?: "entry" | "package";
 }
 
-export type LayerState = "disabled" | "enabled" | "unset";
+export interface ResolvedConfig {
+	resolve(target: ToggleTarget): Resolution;
+}
 
 export function userConfigPath(agentDir: string): string {
 	return join(agentDir, CONFIG_FILE_NAME);
@@ -74,42 +63,30 @@ export function projectConfigPath(cwd: string): string {
 }
 
 export function emptyConfig(): ScopeConfig {
-	return {
-		version: CONFIG_VERSION,
-		disabled: { tools: [], skills: [], packages: [], sections: [] },
-		enabled: { tools: [], skills: [], packages: [], sections: [] },
-		extra: {},
-	};
+	return { version: CONFIG_VERSION, values: emptyValues(), extra: {} };
 }
 
 export function parseConfig(text: string): ParseResult {
 	const root = parseRoot(text);
 	if (!root.ok) return root;
-	const version = root.record["version"] ?? CONFIG_VERSION;
-	if (typeof version !== "number" || !Number.isInteger(version) || version !== CONFIG_VERSION) {
-		return { ok: false, error: `version must be ${CONFIG_VERSION}` };
+	const version = root.record["version"] ?? 1;
+	if (typeof version !== "number" || !Number.isInteger(version) || (version !== 1 && version !== CONFIG_VERSION)) {
+		return { ok: false, error: `version must be 1 or ${CONFIG_VERSION}` };
 	}
-	const disabled = parseLists(root.record["disabled"]);
-	if (disabled === undefined) {
-		return { ok: false, error: "disabled must map tools, skills, and packages to arrays of names" };
+	if (version === 1) return fromLegacy(root.record);
+	const values = emptyValues();
+	for (const kind of RESOURCE_KINDS) {
+		const map = parseValueMap(root.record[kind]);
+		if (map === undefined) return { ok: false, error: `${kind} must map names to "on" or "off"` };
+		values[kind] = map;
 	}
-	const enabled = parseLists(root.record["enabled"]);
-	if (enabled === undefined) {
-		return { ok: false, error: "enabled must map tools, skills, and packages to arrays of names" };
-	}
-	const sections = parseSections(root.record["sections"]);
-	if (sections === undefined) {
-		return { ok: false, error: "sections must map disabled and enabled to arrays of names" };
-	}
-	return {
-		ok: true,
-		config: {
-			version,
-			disabled: { ...disabled, sections: sections.disabled },
-			enabled: { ...enabled, sections: sections.enabled },
-			extra: extraFields(root.record),
-		},
-	};
+	return { ok: true, config: { version: CONFIG_VERSION, values, extra: extraFields(root.record) } };
+}
+
+function fromLegacy(record: Record<string, unknown>): ParseResult {
+	const legacy = parseLegacyV1(record);
+	if (!legacy.ok) return legacy;
+	return { ok: true, config: { version: CONFIG_VERSION, values: legacy.values, extra: legacy.extra } };
 }
 
 function parseRoot(text: string): { ok: true; record: Record<string, unknown> } | { ok: false; error: string } {
@@ -125,11 +102,22 @@ function parseRoot(text: string): { ok: true; record: Record<string, unknown> } 
 	return { ok: true, record: value as Record<string, unknown> };
 }
 
+function parseValueMap(value: unknown): Record<string, Value> | undefined {
+	if (value === undefined) return {};
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const map: Record<string, Value> = {};
+	for (const [name, setting] of Object.entries(value as Record<string, unknown>)) {
+		if (name === "" || (setting !== "on" && setting !== "off")) return undefined;
+		map[name] = setting;
+	}
+	return map;
+}
+
 function extraFields(record: Record<string, unknown>): Record<string, unknown> {
+	const known: readonly string[] = ["version", ...RESOURCE_KINDS];
 	const extra: Record<string, unknown> = {};
 	for (const [key, entry] of Object.entries(record)) {
-		if (key === "version" || key === "disabled" || key === "enabled" || key === "sections") continue;
-		extra[key] = entry;
+		if (!known.includes(key)) extra[key] = entry;
 	}
 	return extra;
 }
@@ -149,13 +137,11 @@ export function readConfigFile(path: string): ScopeFile {
 }
 
 export function serializeConfig(config: ScopeConfig): string {
-	const output: Record<string, unknown> = { version: config.version };
-	const disabled = compactLists(config.disabled);
-	if (Object.keys(disabled).length > 0) output["disabled"] = disabled;
-	const enabled = compactLists(config.enabled);
-	if (Object.keys(enabled).length > 0) output["enabled"] = enabled;
-	const sections = compactSections(config.disabled.sections, config.enabled.sections);
-	if (sections !== undefined) output["sections"] = sections;
+	const output: Record<string, unknown> = { version: CONFIG_VERSION };
+	for (const kind of RESOURCE_KINDS) {
+		const entries = sortedEntries(config.values[kind]);
+		if (entries.length > 0) output[kind] = Object.fromEntries(entries);
+	}
 	for (const [key, value] of Object.entries(config.extra)) output[key] = value;
 	return `${JSON.stringify(output, undefined, 2)}\n`;
 }
@@ -169,152 +155,52 @@ export function writeConfigFile(file: ScopeFile): void {
 	renameSync(temporary, file.path);
 }
 
-export function setDisabled(config: ScopeConfig, kind: ResourceKind, name: string, disabled: boolean): void {
-	config.disabled[kind] = withEntry(config.disabled[kind], name, disabled);
+/** The setting this file holds for the target's own entry. Package entries are not consulted. */
+export function valueIn(config: ScopeConfig | undefined, target: ToggleTarget): Setting {
+	return config?.values[target.kind][target.name] ?? "inherit";
 }
 
-export function setEnabled(config: ScopeConfig, kind: ResourceKind, name: string, enabled: boolean): void {
-	config.enabled[kind] = withEntry(config.enabled[kind], name, enabled);
+/** Write one target's setting into one file. `inherit` removes the entry. */
+export function setValue(config: ScopeConfig, target: ToggleTarget, setting: Setting): void {
+	if (setting === "inherit") {
+		const remaining = Object.entries(config.values[target.kind]).filter(([name]) => name !== target.name);
+		config.values[target.kind] = Object.fromEntries(remaining);
+		return;
+	}
+	config.values[target.kind][target.name] = setting;
 }
 
+/**
+ * The project file is consulted first, then the user file. Within one file the
+ * target's own entry beats its package's entry.
+ */
 export function resolveConfig(user: ScopeConfig, project: ScopeConfig | undefined): ResolvedConfig {
-	const userSets = toSets(user);
-	const projectSets = project === undefined ? undefined : toSets(project);
+	const layers: Array<[ScopeName, ScopeConfig]> =
+		project === undefined
+			? [["user", user]]
+			: [
+					["project", project],
+					["user", user],
+				];
 	return {
-		isDisabled(target: ToggleTarget): boolean {
-			let disabled = false;
-			if (matches(userSets, target, "disabled")) disabled = true;
-			if (matches(userSets, target, "enabled")) disabled = false;
-			if (projectSets !== undefined) {
-				if (matches(projectSets, target, "disabled")) disabled = true;
-				if (matches(projectSets, target, "enabled")) disabled = false;
+		resolve(target: ToggleTarget): Resolution {
+			for (const [scope, config] of layers) {
+				const hit = lookup(config.values, target);
+				if (hit !== undefined) return { value: hit.value, scope, via: hit.via };
 			}
-			return disabled;
+			return {};
 		},
 	};
 }
 
-/**
- * Set the target in one scope so the effective state becomes `enabled`.
- * Turning on first clears this layer's disable; when the target would still be
- * disabled by another layer or by this layer's package entry, the layer records
- * an explicit enable override.
- */
-export function toggleInScope(
-	user: ScopeConfig,
-	project: ScopeConfig | undefined,
-	scope: ScopeName,
-	target: ToggleTarget,
-	enabled: boolean,
-): void {
-	const config = scope === "user" ? user : project;
-	if (config === undefined) throw new Error("the project scope is unavailable");
-	if (!enabled) {
-		setEnabled(config, target.kind, target.name, false);
-		setDisabled(config, target.kind, target.name, true);
-		return;
-	}
-	setDisabled(config, target.kind, target.name, false);
-	const stillDisabled = resolveConfig(user, project).isDisabled(target);
-	setEnabled(config, target.kind, target.name, stillDisabled);
+function lookup(values: Values, target: ToggleTarget): { value: Value; via: "entry" | "package" } | undefined {
+	const entry = values[target.kind][target.name];
+	if (entry !== undefined) return { value: entry, via: "entry" };
+	if (target.packageName === undefined) return undefined;
+	const owner = values.packages[target.packageName];
+	return owner === undefined ? undefined : { value: owner, via: "package" };
 }
 
-/** What one file records for a target, ignoring the other layer. */
-export function layerState(config: ScopeConfig | undefined, target: ToggleTarget): LayerState {
-	if (config === undefined) return "unset";
-	if (config.disabled[target.kind].includes(target.name)) return "disabled";
-	if (config.enabled[target.kind].includes(target.name)) return "enabled";
-	return "unset";
-}
-
-interface LayerSets {
-	disabled: Map<ResourceKind, Set<string>>;
-	enabled: Map<ResourceKind, Set<string>>;
-}
-
-function matches(layer: LayerSets, target: ToggleTarget, field: keyof LayerSets): boolean {
-	if (layer[field].get(target.kind)?.has(target.name) === true) return true;
-	if (target.packageName === undefined) return false;
-	return layer[field].get("packages")?.has(target.packageName) === true;
-}
-
-function toSets(config: ScopeConfig): LayerSets {
-	return {
-		disabled: new Map(RESOURCE_KINDS.map((kind) => [kind, new Set(config.disabled[kind])])),
-		enabled: new Map(RESOURCE_KINDS.map((kind) => [kind, new Set(config.enabled[kind])])),
-	};
-}
-
-function parseLists(value: unknown): Record<DiskKind, string[]> | undefined {
-	if (value === undefined) return { tools: [], skills: [], packages: [] };
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-	const record = value as Record<string, unknown>;
-	for (const key of Object.keys(record)) {
-		if (key !== "tools" && key !== "skills" && key !== "packages") return undefined;
-	}
-	const lists: Record<DiskKind, string[]> = { tools: [], skills: [], packages: [] };
-	for (const kind of DISK_KINDS) {
-		const parsed = parseNameList(record[kind]);
-		if (parsed === undefined) return undefined;
-		lists[kind] = parsed;
-	}
-	return lists;
-}
-
-/** The top-level `sections` key: `disabled` and `enabled` lists of section names. */
-function parseSections(value: unknown): SectionLists | undefined {
-	if (value === undefined) return { disabled: [], enabled: [] };
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-	const record = value as Record<string, unknown>;
-	for (const key of Object.keys(record)) {
-		if (key !== "disabled" && key !== "enabled") return undefined;
-	}
-	const disabled = parseNameList(record["disabled"]);
-	const enabled = parseNameList(record["enabled"]);
-	if (disabled === undefined || enabled === undefined) return undefined;
-	return { disabled, enabled };
-}
-
-function parseNameList(value: unknown): string[] | undefined {
-	if (value === undefined) return [];
-	if (!Array.isArray(value)) return undefined;
-	const names: string[] = [];
-	for (const entry of value) {
-		if (typeof entry !== "string" || entry.length === 0) return undefined;
-		names.push(entry);
-	}
-	return normalizeList(names);
-}
-
-function compactLists(lists: Record<ResourceKind, string[]>): Record<string, string[]> {
-	const result: Record<string, string[]> = {};
-	for (const kind of DISK_KINDS) {
-		const names = normalizeList(lists[kind]);
-		if (names.length > 0) result[kind] = names;
-	}
-	return result;
-}
-
-function compactSections(
-	disabled: readonly string[],
-	enabled: readonly string[],
-): Record<string, string[]> | undefined {
-	const result: Record<string, string[]> = {};
-	const off = normalizeList(disabled);
-	const on = normalizeList(enabled);
-	if (off.length > 0) result["disabled"] = off;
-	if (on.length > 0) result["enabled"] = on;
-	if (Object.keys(result).length === 0) return undefined;
-	return result;
-}
-
-function withEntry(names: readonly string[], name: string, present: boolean): string[] {
-	const next = new Set(names);
-	if (present) next.add(name);
-	else next.delete(name);
-	return normalizeList([...next]);
-}
-
-function normalizeList(names: readonly string[]): string[] {
-	return [...new Set(names)].sort();
+function sortedEntries(map: Record<string, Value>): Array<[string, Value]> {
+	return Object.entries(map).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
 }

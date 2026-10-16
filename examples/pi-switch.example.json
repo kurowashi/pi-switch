@@ -1,13 +1,16 @@
 {
-  "version": 1,
-  "disabled": {
-    "packages": ["npm:pi-exa"],
-    "skills": ["pdf"]
+  "version": 2,
+  "tools": {
+    "exa_search": "on",
+    "grep": "off"
   },
-  "enabled": {
-    "tools": ["exa_search"]
+  "skills": {
+    "pdf": "off"
+  },
+  "packages": {
+    "npm:pi-exa": "off"
   },
   "sections": {
-    "disabled": ["docs"]
+    "docs": "off"
   }
 }

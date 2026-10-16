@@ -5,6 +5,9 @@
  * against real config files under a temporary agent directory, so the file
  * format, the trust gate, and the live tool and skill updates stay covered
  * end to end. See src/index.ts for the wiring and src/picker.ts for the keys.
+ *
+ * Space cycles a row through inherit, on, off. A tool Pi already runs therefore
+ * shows the same glyph after its first Space, but its file gains an explicit "on".
  */
 
 import assert from "node:assert/strict";
@@ -254,17 +257,34 @@ async function withAgentDirectory(run: (agentDir: string) => Promise<void>): Pro
 	}
 }
 
-test("session_start applies disabled tools and skills from the user config", async () => {
+/** Keys the picker handles, as terminal input. */
+const KEY = {
+	down: "\x1b[B",
+	up: "\x1b[A",
+	left: "\x1b[D",
+	right: "\x1b[C",
+	pageUp: "\x1b[5~",
+	pageDown: "\x1b[6~",
+	home: "\x1b[H",
+	end: "\x1b[F",
+	tab: "\t",
+	space: " ",
+	escape: "\x1b",
+} as const;
+
+const START = { type: "session_start", reason: "startup" } as const;
+
+function screen(picker: Component, width = 120): string {
+	return picker.render(width).join("\n");
+}
+
+test("session_start applies off tools and skills from the user config", async () => {
 	await withAgentDirectory(async (agentDir) => {
 		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
-			writeJson(userConfig(agentDir), { version: 1, disabled: { tools: ["off"], skills: ["hidden"] } });
-			const harness = createHarness({
-				cwd,
-				active: ["on", "off"],
-				tools: [tool("on"), tool("off")],
-			});
-			await harness.emit("session_start", { type: "session_start", reason: "startup" });
+			writeJson(userConfig(agentDir), { version: 2, tools: { off: "off" }, skills: { hidden: "off" } });
+			const harness = createHarness({ cwd, active: ["on", "off"], tools: [tool("on"), tool("off")] });
+			await harness.emit("session_start", START);
 			assert.deepEqual(harness.setActiveCalls.at(-1), ["on"]);
 
 			const event = beforeAgentStart([skill("hidden"), skill("visible")]);
@@ -279,18 +299,22 @@ test("session_start applies disabled tools and skills from the user config", asy
 	});
 });
 
-test("a disabled package hides its tools and skills", async () => {
+test("an off package hides its tools and skills, and an on item inside it stays visible", async () => {
 	await withAgentDirectory(async (agentDir) => {
 		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
-			writeJson(userConfig(agentDir), { version: 1, disabled: { packages: ["npm:pi-exa"] } });
+			writeJson(userConfig(agentDir), {
+				version: 2,
+				packages: { "npm:pi-exa": "off" },
+				tools: { packaged: "on" },
+			});
 			const harness = createHarness({
 				cwd,
-				active: ["packaged", "loose"],
-				tools: [tool("packaged", packageSource("pi-exa")), tool("loose")],
+				active: ["packaged", "other", "loose"],
+				tools: [tool("packaged", packageSource("pi-exa")), tool("other", packageSource("pi-exa")), tool("loose")],
 			});
-			await harness.emit("session_start", { type: "session_start", reason: "startup" });
-			assert.deepEqual(harness.setActiveCalls.at(-1), ["loose"]);
+			await harness.emit("session_start", START);
+			assert.deepEqual(harness.setActiveCalls.at(-1), ["packaged", "loose"]);
 
 			const event = beforeAgentStart([skill("packaged-skill", packageSource("pi-exa")), skill("loose-skill")]);
 			await harness.emit("before_agent_start", event);
@@ -304,12 +328,12 @@ test("a disabled package hides its tools and skills", async () => {
 	});
 });
 
-test("session_start leaves the active set alone when nothing is disabled", async () => {
+test("session_start leaves the active set alone when nothing is configured", async () => {
 	await withAgentDirectory(async () => {
 		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			const harness = createHarness({ cwd, active: ["a"], tools: [tool("a")] });
-			await harness.emit("session_start", { type: "session_start", reason: "startup" });
+			await harness.emit("session_start", START);
 			assert.deepEqual(harness.setActiveCalls, [], "an unchanged set must not be re-asserted");
 			assert.deepEqual(harness.active, ["a"]);
 		} finally {
@@ -318,25 +342,54 @@ test("session_start leaves the active set alone when nothing is disabled", async
 	});
 });
 
-test("a trusted project can enable what the user disabled, an untrusted one is ignored", async () => {
+test("a trusted project overrides the user, an untrusted one is ignored", async () => {
 	await withAgentDirectory(async (agentDir) => {
 		const trustedCwd = temporaryDirectory("pi-switch-trusted-");
 		const untrustedCwd = temporaryDirectory("pi-switch-untrusted-");
 		try {
-			writeJson(userConfig(agentDir), { version: 1, disabled: { tools: ["a"] } });
-			writeJson(projectConfig(trustedCwd), { version: 1, enabled: { tools: ["a"] } });
-			writeJson(projectConfig(untrustedCwd), { version: 1, enabled: { tools: ["a"] } });
+			writeJson(userConfig(agentDir), { version: 2, tools: { a: "off" } });
+			writeJson(projectConfig(trustedCwd), { version: 2, tools: { a: "on" } });
+			writeJson(projectConfig(untrustedCwd), { version: 2, tools: { a: "on" } });
 
 			const trusted = createHarness({ cwd: trustedCwd, trusted: true, active: ["a"], tools: [tool("a")] });
-			await trusted.emit("session_start", { type: "session_start", reason: "startup" });
+			await trusted.emit("session_start", START);
 			assert.deepEqual(trusted.active, ["a"]);
 
 			const untrusted = createHarness({ cwd: untrustedCwd, trusted: false, active: ["a"], tools: [tool("a")] });
-			await untrusted.emit("session_start", { type: "session_start", reason: "startup" });
+			await untrusted.emit("session_start", START);
 			assert.deepEqual(untrusted.active, []);
 		} finally {
 			rmSync(trustedCwd, { recursive: true, force: true });
 			rmSync(untrustedCwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("a tool Pi started inactive shows Pi's default, and Space walks inherit, on, off, inherit", async () => {
+	await withAgentDirectory(async (agentDir) => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			const harness = createHarness({ cwd, active: ["read"], tools: [tool("read"), tool("grep")] });
+			await harness.emit("session_start", START);
+			await harness.runCommand();
+			const picker = await harness.openPicker();
+			picker.handleInput?.(KEY.down);
+			assert.match(screen(picker), /○ grep/, "grep is off by Pi's default, so it must not show as on");
+
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2, tools: { grep: "on" } });
+			assert.deepEqual(harness.setActiveCalls.at(-1), ["read", "grep"]);
+
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2, tools: { grep: "off" } });
+			assert.deepEqual(harness.setActiveCalls.at(-1), ["read"]);
+
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2 }, "inherit removes the entry");
+			assert.deepEqual(harness.setActiveCalls.at(-1), ["read"], "Pi's default for grep is off");
+			assert.match(screen(picker), /○ grep/);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
 		}
 	});
 });
@@ -348,9 +401,9 @@ test("a toggle re-reads the files so an external edit is not clobbered", async (
 			const harness = createHarness({ cwd, active: ["a", "b"], tools: [tool("a"), tool("b")] });
 			await harness.runCommand();
 			const picker = await harness.openPicker();
-			writeJson(userConfig(agentDir), { version: 1, disabled: { tools: ["b"] } });
-			picker.handleInput?.(" ");
-			assert.deepEqual(readJson(userConfig(agentDir)), { version: 1, disabled: { tools: ["a", "b"] } });
+			writeJson(userConfig(agentDir), { version: 2, tools: { b: "off" } });
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2, tools: { a: "on", b: "off" } });
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
@@ -366,139 +419,49 @@ test("a failed write is reported, leaves no file, and is re-read", async () => {
 			const picker = await harness.openPicker();
 			chmodSync(agentDir, 0o500);
 			try {
-				picker.handleInput?.(" ");
+				picker.handleInput?.(KEY.space);
 			} finally {
 				chmodSync(agentDir, 0o700);
 			}
 			assert.match(harness.notifications.at(-1)?.message ?? "", /EACCES|permission denied/i);
 			assert.equal(existsSync(userConfig(agentDir)), false, "a failed write must leave no file behind");
-			assert.deepEqual(harness.setActiveCalls, [], "the re-read config disables nothing");
+			assert.deepEqual(harness.setActiveCalls, [], "the re-read config changes nothing");
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	});
 });
 
-test("enabling globally against a project disable reports that this project stays disabled", async () => {
+test("on in Global under an off Project reports that the project keeps it off", async () => {
 	await withAgentDirectory(async (agentDir) => {
 		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
-			writeJson(userConfig(agentDir), { version: 1, disabled: { tools: ["a"] } });
-			writeJson(projectConfig(cwd), { version: 1, disabled: { tools: ["a"] } });
+			writeJson(projectConfig(cwd), { version: 2, tools: { a: "off" } });
 			const harness = createHarness({ cwd, trusted: true, active: [], tools: [tool("a")] });
 			await harness.runCommand();
 			const picker = await harness.openPicker();
-			picker.handleInput?.(" ");
-			assert.deepEqual(readJson(userConfig(agentDir)), { version: 1, enabled: { tools: ["a"] } });
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2, tools: { a: "on" } });
 			assert.match(harness.notifications.at(-1)?.message ?? "", /project config/);
+			assert.deepEqual(harness.setActiveCalls, [], "the project still turns a off");
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	});
 });
 
-test("the picker toggles a tool in the user scope and applies it immediately", async () => {
-	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-switch-cwd-");
-		try {
-			const harness = createHarness({ cwd, active: ["a", "b"], tools: [tool("a"), tool("b")] });
-			await harness.runCommand();
-			const picker = await harness.openPicker();
-			assert.match(picker.render(120).join("\n"), /Global/);
-			picker.handleInput?.(" ");
-			assert.deepEqual(readJson(userConfig(agentDir)), { version: 1, disabled: { tools: ["a"] } });
-			assert.deepEqual(harness.setActiveCalls.at(-1), ["b"]);
-			assert.match(picker.render(120).join("\n"), /○ a/);
-		} finally {
-			rmSync(cwd, { recursive: true, force: true });
-		}
-	});
-});
-
-test("the picker toggles a whole package from its row", async () => {
-	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-switch-cwd-");
-		try {
-			const harness = createHarness({
-				cwd,
-				active: ["packaged"],
-				tools: [tool("packaged", packageSource("pi-exa"))],
-			});
-			await harness.runCommand();
-			const picker = await harness.openPicker();
-			picker.handleInput?.(" ");
-			assert.deepEqual(readJson(userConfig(agentDir)), {
-				version: 1,
-				disabled: { tools: ["packaged"], packages: ["npm:pi-exa"] },
-			});
-			assert.deepEqual(harness.setActiveCalls.at(-1), []);
-			assert.match(picker.render(120).join("\n"), /g:off/);
-		} finally {
-			rmSync(cwd, { recursive: true, force: true });
-		}
-	});
-});
-
-test("the picker enables a package row that the config disabled", async () => {
-	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-switch-cwd-");
-		try {
-			writeJson(userConfig(agentDir), { version: 1, disabled: { packages: ["npm:pi-exa"] } });
-			const harness = createHarness({
-				cwd,
-				active: ["packaged"],
-				tools: [tool("packaged", packageSource("pi-exa"))],
-			});
-			await harness.emit("session_start", { type: "session_start", reason: "startup" });
-			assert.deepEqual(harness.active, [], "the disabled package starts hidden");
-			await harness.runCommand();
-			const picker = await harness.openPicker();
-			picker.handleInput?.(" ");
-			assert.deepEqual(readJson(userConfig(agentDir)), { version: 1 });
-			assert.deepEqual(harness.setActiveCalls.at(-1), ["packaged"]);
-			assert.match(picker.render(120).join("\n"), /● npm:pi-exa/);
-		} finally {
-			rmSync(cwd, { recursive: true, force: true });
-		}
-	});
-});
-
-test("a partial package row shows the partial glyph and turns every child on", async () => {
-	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-switch-cwd-");
-		try {
-			writeJson(userConfig(agentDir), { version: 1, disabled: { tools: ["a"] } });
-			const harness = createHarness({
-				cwd,
-				active: ["a", "b"],
-				tools: [tool("a", packageSource("pi-exa")), tool("b", packageSource("pi-exa"))],
-			});
-			await harness.emit("session_start", { type: "session_start", reason: "startup" });
-			assert.deepEqual(harness.active, ["b"], "only the enabled child starts active");
-			await harness.runCommand();
-			const picker = await harness.openPicker();
-			assert.match(picker.render(120).join("\n"), /◐ npm:pi-exa/);
-			picker.handleInput?.(" ");
-			assert.deepEqual(readJson(userConfig(agentDir)), { version: 1 });
-			assert.deepEqual(harness.setActiveCalls.at(-1), ["a", "b"]);
-			assert.match(picker.render(120).join("\n"), /● npm:pi-exa/);
-		} finally {
-			rmSync(cwd, { recursive: true, force: true });
-		}
-	});
-});
-
-test("the picker switches to project scope and writes the project file", async () => {
+test("the picker writes the project file in the Project scope and leaves the user file alone", async () => {
 	await withAgentDirectory(async (agentDir) => {
 		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			const harness = createHarness({ cwd, trusted: true, active: ["a", "b"], tools: [tool("a"), tool("b")] });
 			await harness.runCommand();
 			const picker = await harness.openPicker();
-			picker.handleInput?.("\t");
-			assert.match(picker.render(120).join("\n"), /\[Project\]/);
-			picker.handleInput?.(" ");
-			assert.deepEqual(readJson(projectConfig(cwd)), { version: 1, disabled: { tools: ["a"] } });
+			picker.handleInput?.(KEY.tab);
+			assert.match(screen(picker), /\[Project\]/);
+			picker.handleInput?.(KEY.space);
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(projectConfig(cwd)), { version: 2, tools: { a: "off" } });
 			assert.equal(existsSync(userConfig(agentDir)), false, "the user file must stay untouched");
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
@@ -513,9 +476,9 @@ test("an untrusted project blocks project toggles", async () => {
 			const harness = createHarness({ cwd, trusted: false, active: ["a"], tools: [tool("a")] });
 			await harness.runCommand();
 			const picker = await harness.openPicker();
-			picker.handleInput?.("\t");
-			assert.match(picker.render(120).join("\n"), /not trusted/);
-			picker.handleInput?.(" ");
+			picker.handleInput?.(KEY.tab);
+			assert.match(screen(picker), /not trusted/);
+			picker.handleInput?.(KEY.space);
 			assert.equal(existsSync(projectConfig(cwd)), false);
 			assert.deepEqual(harness.setActiveCalls, [], "nothing may change");
 			assert.match(harness.notifications.at(-1)?.message ?? "", /not trusted/);
@@ -533,18 +496,18 @@ test("filtering narrows rows, backspace edits, and escape clears then closes", a
 			await harness.runCommand();
 			const picker = await harness.openPicker();
 			picker.handleInput?.("b");
-			assert.doesNotMatch(picker.render(120).join("\n"), /alpha/);
+			assert.doesNotMatch(screen(picker), /alpha/);
 			picker.handleInput?.("e");
 			picker.handleInput?.("\x7f");
-			assert.match(picker.render(120).join("\n"), /beta/);
+			assert.match(screen(picker), /beta/);
 			picker.handleInput?.("\u0015");
-			assert.match(picker.render(120).join("\n"), /alpha/);
+			assert.match(screen(picker), /alpha/);
 			picker.handleInput?.("\u0085");
-			assert.match(picker.render(120).join("\n"), /type to search/, "a C1 control must not enter the filter");
+			assert.match(screen(picker), /type to search/, "a C1 control must not enter the filter");
 			picker.handleInput?.("a");
-			picker.handleInput?.("\x1b");
+			picker.handleInput?.(KEY.escape);
 			assert.equal(harness.closed(), false, "the first escape clears the filter");
-			picker.handleInput?.("\x1b");
+			picker.handleInput?.(KEY.escape);
 			assert.equal(harness.closed(), true);
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
@@ -552,54 +515,169 @@ test("filtering narrows rows, backspace edits, and escape clears then closes", a
 	});
 });
 
-test("the selection moves and toggles the next row", async () => {
+test("the selection moves and Space changes the row it is on", async () => {
 	await withAgentDirectory(async (agentDir) => {
 		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			const harness = createHarness({ cwd, active: ["a", "b"], tools: [tool("a"), tool("b")] });
 			await harness.runCommand();
 			const picker = await harness.openPicker();
-			picker.handleInput?.("\x1b[B");
-			picker.handleInput?.(" ");
-			assert.deepEqual(readJson(userConfig(agentDir)), { version: 1, disabled: { tools: ["b"] } });
-			picker.handleInput?.("\x1b[A");
-			picker.handleInput?.(" ");
-			assert.deepEqual(readJson(userConfig(agentDir)), { version: 1, disabled: { tools: ["a", "b"] } });
+			picker.handleInput?.(KEY.down);
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2, tools: { b: "on" } });
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2, tools: { b: "off" } });
+			picker.handleInput?.(KEY.up);
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2, tools: { a: "on", b: "off" } });
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	});
 });
 
-test("a malformed user config is warned about once and is never overwritten", async () => {
+test("the Packages tab toggles a package row and removes the entries inside it", async () => {
 	await withAgentDirectory(async (agentDir) => {
 		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
-			writeFileSync(userConfig(agentDir), "{ nope", "utf8");
-			const harness = createHarness({ cwd, active: ["a"], tools: [tool("a")] });
-			await harness.emit("session_start", { type: "session_start", reason: "startup" });
-			await harness.emit("session_start", { type: "session_start", reason: "reload" });
-			assert.equal(harness.notifications.length, 1);
-			assert.equal(readFileSync(userConfig(agentDir), "utf8"), "{ nope");
+			writeJson(userConfig(agentDir), { version: 2, tools: { packaged: "off" } });
+			const harness = createHarness({
+				cwd,
+				active: ["other"],
+				tools: [tool("packaged", packageSource("pi-exa")), tool("other")],
+			});
+			await harness.emit("session_start", START);
+			await harness.runCommand();
+			const picker = await harness.openPicker();
+			picker.handleInput?.(KEY.right);
+			picker.handleInput?.(KEY.right);
+			assert.match(screen(picker), /○ npm:pi-exa/, "the off child makes the package row off");
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2, packages: { "npm:pi-exa": "on" } });
+			assert.deepEqual(harness.setActiveCalls.at(-1), ["packaged", "other"]);
+			assert.match(screen(picker), /● npm:pi-exa/);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("a partial package row shows the partial glyph and Space turns every child on", async () => {
+	await withAgentDirectory(async (agentDir) => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			writeJson(userConfig(agentDir), { version: 2, tools: { a: "off" } });
+			const harness = createHarness({
+				cwd,
+				active: ["a", "b"],
+				tools: [tool("a", packageSource("pi-exa")), tool("b", packageSource("pi-exa"))],
+			});
+			await harness.emit("session_start", START);
+			assert.deepEqual(harness.active, ["b"], "only the enabled child starts active");
+			await harness.runCommand();
+			const picker = await harness.openPicker();
+			picker.handleInput?.(KEY.right);
+			picker.handleInput?.(KEY.right);
+			assert.match(screen(picker), /◐ npm:pi-exa/);
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2, packages: { "npm:pi-exa": "on" } });
+			assert.deepEqual(harness.setActiveCalls.at(-1), ["a", "b"]);
+			assert.match(screen(picker), /● npm:pi-exa/);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("the Sections tab lists sections and writes them to the top-level key", async () => {
+	await withAgentDirectory(async (agentDir) => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			const harness = createHarness({ cwd });
+			await harness.runCommand();
+			const picker = await harness.openPicker();
+			picker.handleInput?.(KEY.left);
+			assert.match(screen(picker), /\[Sections\]/);
+			assert.match(screen(picker), /docs/);
+			picker.handleInput?.("docs");
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2, sections: { docs: "on" } });
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2, sections: { docs: "off" } });
+			assert.match(screen(picker), /○ docs/);
+			assert.deepEqual(harness.setActiveCalls, [], "sections need no tool re-application");
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("the MCP tab shows a server as one row and toggles the whole group with one write", async () => {
+	await withAgentDirectory(async (agentDir) => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			const harness = createHarness({
+				cwd,
+				active: ["mcp__docs__search", "mcp__docs__read"],
+				tools: [mcpTool("mcp__docs__search", "docs", "Searches the docs"), mcpTool("mcp__docs__read", "docs")],
+			});
+			await harness.runCommand();
+			const picker = await harness.openPicker();
+			picker.handleInput?.(KEY.right);
+			picker.handleInput?.(KEY.right);
+			picker.handleInput?.(KEY.right);
+			const before = screen(picker);
+			assert.match(before, /\[MCP\]/);
+			assert.match(before, /mcp__docs {2}2 tools {2}Searches the docs/);
+			assert.doesNotMatch(before, /mcp__docs__search/, "child tools are not listed under the server");
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2, packages: { mcp__docs: "on" } });
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2, packages: { mcp__docs: "off" } });
+			assert.deepEqual(harness.setActiveCalls.at(-1), []);
+			assert.match(screen(picker), /○ mcp__docs/);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("an MCP tool registered after session_start is hidden before the next request", async () => {
+	await withAgentDirectory(async (agentDir) => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			writeJson(userConfig(agentDir), { version: 2, packages: { mcp__docs: "off" } });
+			const harness = createHarness({ cwd, active: ["read"], tools: [tool("read")] });
+			await harness.emit("session_start", START);
+			assert.deepEqual(harness.setActiveCalls, [], "nothing changes before the server connects");
+
+			harness.registerTools(mcpTool("mcp__docs__search", "docs"));
+			await harness.emit("before_agent_start", beforeAgentStart([]));
+			assert.deepEqual(harness.setActiveCalls.at(-1), ["read"]);
+			assert.deepEqual(harness.active, ["read"]);
 
 			await harness.runCommand();
 			const picker = await harness.openPicker();
-			picker.handleInput?.(" ");
-			assert.equal(readFileSync(userConfig(agentDir), "utf8"), "{ nope");
-			assert.match(harness.notifications.at(-1)?.message ?? "", /refusing to edit/);
+			picker.handleInput?.(KEY.right);
+			picker.handleInput?.(KEY.right);
+			picker.handleInput?.(KEY.right);
+			assert.match(screen(picker), /○ mcp__docs/);
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2 }, "off inherits, and Pi's default for MCP is on");
+			assert.deepEqual(harness.setActiveCalls.at(-1), ["read", "mcp__docs__search"]);
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	});
 });
 
-test("context_with_system removes disabled sections and keeps the rest of the request", async () => {
+test("context_with_system removes off sections and keeps the rest of the request", async () => {
 	await withAgentDirectory(async (agentDir) => {
 		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
-			writeJson(userConfig(agentDir), { version: 1, sections: { disabled: ["docs"] } });
+			writeJson(userConfig(agentDir), { version: 2, sections: { docs: "off" } });
 			const harness = createHarness({ cwd });
-			await harness.emit("session_start", { type: "session_start", reason: "startup" });
+			await harness.emit("session_start", START);
 			const result = (await harness.emit(
 				"context_with_system",
 				contextWithSystem({ preamble: "P", docs: "D", rules: "R" }),
@@ -615,7 +693,7 @@ test("context_with_system removes disabled sections and keeps the rest of the re
 	});
 });
 
-test("context_with_system leaves the request alone when no section is disabled", async () => {
+test("context_with_system leaves the request alone when no section is off", async () => {
 	await withAgentDirectory(async () => {
 		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
@@ -628,23 +706,23 @@ test("context_with_system leaves the request alone when no section is disabled",
 	});
 });
 
-test("a project section disable applies only when the project is trusted", async () => {
+test("a project section off applies only when the project is trusted", async () => {
 	await withAgentDirectory(async () => {
 		const trustedCwd = temporaryDirectory("pi-switch-trusted-");
 		const untrustedCwd = temporaryDirectory("pi-switch-untrusted-");
 		try {
-			writeJson(projectConfig(trustedCwd), { version: 1, sections: { disabled: ["docs"] } });
-			writeJson(projectConfig(untrustedCwd), { version: 1, sections: { disabled: ["docs"] } });
+			writeJson(projectConfig(trustedCwd), { version: 2, sections: { docs: "off" } });
+			writeJson(projectConfig(untrustedCwd), { version: 2, sections: { docs: "off" } });
 
 			const trusted = createHarness({ cwd: trustedCwd, trusted: true });
-			await trusted.emit("session_start", { type: "session_start", reason: "startup" });
+			await trusted.emit("session_start", START);
 			assert.notEqual(
 				await trusted.emit("context_with_system", contextWithSystem({ docs: "D", rules: "R" })),
 				undefined,
 			);
 
 			const untrusted = createHarness({ cwd: untrustedCwd, trusted: false });
-			await untrusted.emit("session_start", { type: "session_start", reason: "startup" });
+			await untrusted.emit("session_start", START);
 			assert.equal(
 				await untrusted.emit("context_with_system", contextWithSystem({ docs: "D", rules: "R" })),
 				undefined,
@@ -656,38 +734,46 @@ test("a project section disable applies only when the project is trusted", async
 	});
 });
 
-test("the picker lists sections and writes them to the top-level key", async () => {
-	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-switch-cwd-");
-		try {
-			const harness = createHarness({ cwd });
-			await harness.runCommand();
-			const picker = await harness.openPicker();
-			assert.match(picker.render(120).join("\n"), /Sections/);
-			assert.match(picker.render(120).join("\n"), /docs/);
-			picker.handleInput?.("docs");
-			picker.handleInput?.(" ");
-			assert.deepEqual(readJson(userConfig(agentDir)), { version: 1, sections: { disabled: ["docs"] } });
-			assert.match(picker.render(120).join("\n"), /○ docs/);
-			assert.deepEqual(harness.setActiveCalls, [], "sections need no tool re-application");
-		} finally {
-			rmSync(cwd, { recursive: true, force: true });
-		}
-	});
-});
-
-test("a section observed in a request appears in the picker catalog", async () => {
+test("a section observed in a request appears in the Sections tab", async () => {
 	await withAgentDirectory(async () => {
 		const cwd = temporaryDirectory("pi-switch-cwd-");
 		try {
 			const harness = createHarness({ cwd });
 			await harness.runCommand();
 			const before = await harness.openPicker();
-			assert.doesNotMatch(before.render(120).join("\n"), /knowledge_index/);
+			before.handleInput?.(KEY.left);
+			assert.doesNotMatch(screen(before), /knowledge_index/);
 			await harness.emit("context_with_system", contextWithSystem({ knowledge_index: "K" }));
 			const picker = await harness.openPicker();
+			picker.handleInput?.(KEY.left);
 			picker.handleInput?.("knowledge_index");
-			assert.match(picker.render(120).join("\n"), /knowledge_index/);
+			assert.match(screen(picker), /knowledge_index/);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("the picker shows a derived description for an observed section", async () => {
+	await withAgentDirectory(async () => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			const harness = createHarness({ cwd });
+			await harness.runCommand();
+			await harness.emit(
+				"context_with_system",
+				contextWithSystem({
+					knowledge_index: "<knowledge_index>\n## Project Knowledge\n\nIndex body",
+					long_section: `<long_section>\n${`word `.repeat(40)}\n</long_section>`,
+				}),
+			);
+			const picker = await harness.openPicker();
+			picker.handleInput?.(KEY.left);
+			const text = screen(picker, 400);
+			assert.match(text, /knowledge_index {2}Project Knowledge/);
+			assert.match(text, /long_section {2}word word/);
+			assert.match(text, /…/);
+			assert.match(text, /docs {2}Pi documentation paths and when to read them/);
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
@@ -737,83 +823,6 @@ test("a tool description with line breaks stays on one picker row", async () => 
 	});
 });
 
-test("the picker lists MCP servers and toggles the whole group with one write", async () => {
-	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-switch-cwd-");
-		try {
-			const harness = createHarness({
-				cwd,
-				active: ["mcp__docs__search", "mcp__docs__read"],
-				tools: [mcpTool("mcp__docs__search", "docs", "Searches the docs"), mcpTool("mcp__docs__read", "docs")],
-			});
-			await harness.runCommand();
-			const picker = await harness.openPicker();
-			const before = picker.render(120).join("\n");
-			assert.match(before, /MCP/);
-			assert.match(before, /mcp__docs {2}2 tools {2}Searches the docs/);
-			assert.match(before, /mcp__docs__search {2}mcp__docs/);
-			picker.handleInput?.(" ");
-			assert.deepEqual(readJson(userConfig(agentDir)), { version: 1, disabled: { packages: ["mcp__docs"] } });
-			assert.deepEqual(harness.setActiveCalls.at(-1), []);
-			const after = picker.render(120).join("\n");
-			assert.match(after, /○ mcp__docs/);
-			assert.match(after, /○ mcp__docs__search/);
-		} finally {
-			rmSync(cwd, { recursive: true, force: true });
-		}
-	});
-});
-
-test("an MCP tool registered after session_start is hidden before the next request", async () => {
-	await withAgentDirectory(async (agentDir) => {
-		const cwd = temporaryDirectory("pi-switch-cwd-");
-		try {
-			writeJson(userConfig(agentDir), { version: 1, disabled: { packages: ["mcp__docs"] } });
-			const harness = createHarness({ cwd, active: ["read"], tools: [tool("read")] });
-			await harness.emit("session_start", { type: "session_start", reason: "startup" });
-			assert.deepEqual(harness.setActiveCalls, [], "nothing changes before the server connects");
-
-			harness.registerTools(mcpTool("mcp__docs__search", "docs"));
-			await harness.emit("before_agent_start", beforeAgentStart([]));
-			assert.deepEqual(harness.setActiveCalls.at(-1), ["read"]);
-			assert.deepEqual(harness.active, ["read"]);
-
-			await harness.runCommand();
-			const picker = await harness.openPicker();
-			assert.match(picker.render(120).join("\n"), /○ mcp__docs/);
-			picker.handleInput?.(" ");
-			assert.deepEqual(readJson(userConfig(agentDir)), { version: 1 });
-			assert.deepEqual(harness.setActiveCalls.at(-1), ["read", "mcp__docs__search"]);
-		} finally {
-			rmSync(cwd, { recursive: true, force: true });
-		}
-	});
-});
-
-test("the picker shows a derived description for an observed section", async () => {
-	await withAgentDirectory(async () => {
-		const cwd = temporaryDirectory("pi-switch-cwd-");
-		try {
-			const harness = createHarness({ cwd });
-			await harness.runCommand();
-			await harness.emit(
-				"context_with_system",
-				contextWithSystem({
-					knowledge_index: "<knowledge_index>\n## Project Knowledge\n\nIndex body",
-					long_section: `<long_section>\n${`word `.repeat(40)}\n</long_section>`,
-				}),
-			);
-			const text = (await harness.openPicker()).render(400).join("\n");
-			assert.match(text, /knowledge_index {2}Project Knowledge/);
-			assert.match(text, /long_section {2}word word/);
-			assert.match(text, /…/);
-			assert.match(text, /docs {2}Pi documentation paths and when to read them/);
-		} finally {
-			rmSync(cwd, { recursive: true, force: true });
-		}
-	});
-});
-
 test("page, home, and end keys move by a page and to the edges", async () => {
 	await withAgentDirectory(async (agentDir) => {
 		const cwd = temporaryDirectory("pi-switch-cwd-");
@@ -823,22 +832,67 @@ test("page, home, and end keys move by a page and to the edges", async () => {
 			await harness.runCommand();
 			const picker = await harness.openPicker();
 			picker.handleInput?.("tool-");
-			picker.handleInput?.("\x1b[F");
-			picker.handleInput?.(" ");
-			assert.deepEqual(readJson(userConfig(agentDir)), { version: 1, disabled: { tools: ["tool-19"] } });
-			picker.handleInput?.("\x1b[H");
-			picker.handleInput?.("\x1b[6~");
-			picker.handleInput?.(" ");
+			picker.handleInput?.(KEY.end);
+			picker.handleInput?.(KEY.space);
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2, tools: { "tool-19": "off" } });
+			picker.handleInput?.(KEY.home);
+			picker.handleInput?.(KEY.pageDown);
+			picker.handleInput?.(KEY.space);
+			picker.handleInput?.(KEY.space);
 			assert.deepEqual(readJson(userConfig(agentDir)), {
-				version: 1,
-				disabled: { tools: ["tool-14", "tool-19"] },
+				version: 2,
+				tools: { "tool-14": "off", "tool-19": "off" },
 			});
-			picker.handleInput?.("\x1b[5~");
-			picker.handleInput?.(" ");
+			picker.handleInput?.(KEY.pageUp);
+			picker.handleInput?.(KEY.space);
+			picker.handleInput?.(KEY.space);
 			assert.deepEqual(readJson(userConfig(agentDir)), {
-				version: 1,
-				disabled: { tools: ["tool-00", "tool-14", "tool-19"] },
+				version: 2,
+				tools: { "tool-00": "off", "tool-14": "off", "tool-19": "off" },
 			});
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("a malformed user config is warned about once and is never overwritten", async () => {
+	await withAgentDirectory(async (agentDir) => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			writeFileSync(userConfig(agentDir), "{ nope", "utf8");
+			const harness = createHarness({ cwd, active: ["a"], tools: [tool("a")] });
+			await harness.emit("session_start", START);
+			await harness.emit("session_start", { type: "session_start", reason: "reload" });
+			assert.equal(harness.notifications.length, 1);
+			assert.equal(readFileSync(userConfig(agentDir), "utf8"), "{ nope");
+
+			await harness.runCommand();
+			const picker = await harness.openPicker();
+			picker.handleInput?.(KEY.space);
+			assert.equal(readFileSync(userConfig(agentDir), "utf8"), "{ nope");
+			assert.match(harness.notifications.at(-1)?.message ?? "", /refusing to edit/);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("a version 1 file is read as version 2 and rewritten on the next change", async () => {
+	await withAgentDirectory(async (agentDir) => {
+		const cwd = temporaryDirectory("pi-switch-cwd-");
+		try {
+			writeJson(userConfig(agentDir), { version: 1, disabled: { tools: ["off"] }, enabled: { tools: ["grep"] } });
+			const harness = createHarness({ cwd, active: ["off"], tools: [tool("off"), tool("grep")] });
+			await harness.emit("session_start", START);
+			assert.deepEqual(harness.active, ["grep"]);
+			await harness.runCommand();
+			const picker = await harness.openPicker();
+			// The first row is "off", which inherits on Space and so turns back on.
+			picker.handleInput?.(KEY.space);
+			assert.deepEqual(readJson(userConfig(agentDir)), { version: 2, tools: { grep: "on" } });
+			assert.deepEqual(harness.active, ["off", "grep"]);
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}

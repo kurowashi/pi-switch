@@ -1,22 +1,27 @@
 /**
- * The pi-switch picker: one searchable list of packages, MCP servers, tools,
- * skills, and prompt sections with a live toggle for the active scope.
+ * The pi-switch picker: one kind at a time (packages, MCP servers, tools,
+ * skills, or prompt sections), searchable, with a three-way toggle for the
+ * active scope.
  *
  * The component is written by hand instead of using `SelectList` or
- * `SettingsList` because rows mix several kinds, carry per-scope state badges,
- * and toggling writes files. Tests drive `createScopePicker` directly; `/switch`
- * wraps it in `ctx.ui.custom`. See README.md#コマンド for the keys.
+ * `SettingsList` because rows carry per-scope badges and each toggle writes
+ * files. Tests drive `createScopePicker` directly; `/switch` wraps it in
+ * `ctx.ui.custom`. See README.md#コマンド for the keys.
  */
 
 import type { ExtensionCommandContext, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { type Component, Key, type KeyId, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import type { LayerState, ResolvedConfig, ScopeName, ToggleTarget } from "./config.ts";
+import type { ResolvedConfig } from "./config.ts";
+import { nextSetting, type ScopeName, type Setting, type ToggleTarget } from "./model.ts";
 import {
 	type Catalog,
 	type CatalogItem,
-	itemDisabled,
+	type DefaultOn,
+	isOn,
+	itemOn,
 	itemTarget,
 	type PackageEntry,
+	packageChildren,
 	packageState,
 } from "./resources.ts";
 
@@ -32,13 +37,21 @@ export interface ScopeInfo {
 	reason?: string;
 }
 
+/** One write in a batch: the target and the setting its file should hold afterwards. */
+export interface SettingChange {
+	target: ToggleTarget;
+	setting: Setting;
+}
+
 export interface ScopePickerDeps {
 	catalog(): Catalog;
 	resolved(): ResolvedConfig;
+	defaultOn: DefaultOn;
 	scopes(): ScopeInfo[];
-	layerState(scope: ScopeName, target: ToggleTarget): LayerState;
-	/** Persist the change and update the live session. Siblings are applied as one write. */
-	toggle(scope: ScopeName, targets: readonly ToggleTarget[], enabled: boolean): void;
+	/** The value the given scope's file holds for the target itself. */
+	valueOf(scope: ScopeName, target: ToggleTarget): Setting;
+	/** Persist the changes as one write and update the live session. */
+	apply(scope: ScopeName, changes: readonly SettingChange[]): void;
 	notify(message: string, type?: "info" | "warning" | "error"): void;
 }
 
@@ -50,7 +63,18 @@ interface PickerCallbacks {
 /** Rows shown at once. The terminal height is not available here, so this is fixed. */
 const MAX_VISIBLE_ROWS = 14;
 
-type Row = { type: "section"; label: string } | { type: "item"; item: CatalogItem } | { type: "package"; name: string };
+/** One kind at a time. Packages and MCP servers are separate because MCP groups are many. */
+type Kind = "packages" | "mcp" | "tools" | "skills" | "sections";
+const KINDS: readonly Kind[] = ["tools", "skills", "packages", "mcp", "sections"];
+const KIND_LABELS: Record<Kind, string> = {
+	tools: "Tools",
+	skills: "Skills",
+	packages: "Packages",
+	mcp: "MCP",
+	sections: "Sections",
+};
+
+type Row = { type: "item"; item: CatalogItem } | { type: "package"; name: string };
 
 interface View {
 	rows: Row[];
@@ -62,6 +86,7 @@ const SCOPE_INITIALS: Record<ScopeName, string> = { user: "g", project: "p" };
 
 function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks: PickerCallbacks): Component {
 	let scopeIndex = 0;
+	let kindIndex = 0;
 	let filter = "";
 	let selected = 0;
 
@@ -77,56 +102,44 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 		return scope ?? { name: "user", available: true };
 	}
 
-	function rowsFor(label: string, entries: Row[]): Row[] {
-		return entries.length === 0 ? [] : [{ type: "section" as const, label }, ...entries];
-	}
-
-	function groupRows(catalog: Catalog, kind: PackageEntry["kind"], query: string): Row[] {
-		return catalog.packages
-			.filter((entry) => entry.kind === kind && matchesPackage(entry, query))
-			.map((entry) => ({ type: "package" as const, name: entry.name }));
-	}
-
-	function itemRows(catalog: Catalog, kind: CatalogItem["kind"], query: string): Row[] {
-		return catalog.items
-			.filter((item) => item.kind === kind && matchesItem(item, query))
-			.map((item) => ({ type: "item" as const, item }));
+	function activeKind(): Kind {
+		return KINDS[kindIndex] ?? "tools";
 	}
 
 	function view(): View {
 		const catalog = deps.catalog();
 		const query = filter.trim().toLowerCase();
-		const rows: Row[] = [
-			...rowsFor("Packages", groupRows(catalog, "package", query)),
-			...rowsFor("MCP", groupRows(catalog, "mcp", query)),
-			...rowsFor("Tools", itemRows(catalog, "tool", query)),
-			...rowsFor("Skills", itemRows(catalog, "skill", query)),
-			...rowsFor("Sections", itemRows(catalog, "section", query)),
-		];
-		return { rows, selectable: rows.flatMap((row, index) => (row.type === "section" ? [] : [index])) };
+		const kind = activeKind();
+		const rows: Row[] =
+			kind === "packages" || kind === "mcp"
+				? catalog.packages
+						.filter((entry) => entry.kind === (kind === "mcp" ? "mcp" : "package") && matchesPackage(entry, query))
+						.map((entry) => ({ type: "package" as const, name: entry.name }))
+				: catalog.items
+						.filter((item) => item.kind === itemKindOf(kind) && matchesItem(item, query))
+						.map((item) => ({ type: "item" as const, item }));
+		return { rows, selectable: rows.map((_row, index) => index) };
 	}
 
 	function selectedRow(): Row | undefined {
-		const current = view();
-		const rowIndex = current.selectable[selected];
-		return rowIndex === undefined ? undefined : current.rows[rowIndex];
+		return view().rows[selected];
 	}
 
 	function refresh(): void {
-		const count = view().selectable.length;
+		const count = view().rows.length;
 		selected = count === 0 ? 0 : Math.min(selected, count - 1);
 		callbacks.requestRender();
 	}
 
 	function move(delta: number): void {
-		const count = view().selectable.length;
+		const count = view().rows.length;
 		if (count === 0) return;
 		selected = (selected + delta + count) % count;
 		callbacks.requestRender();
 	}
 
 	function moveTo(index: number): void {
-		const count = view().selectable.length;
+		const count = view().rows.length;
 		if (count === 0) return;
 		selected = Math.max(0, Math.min(index, count - 1));
 		callbacks.requestRender();
@@ -142,32 +155,52 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 		callbacks.requestRender();
 	}
 
-	function toggleSelected(): void {
+	function switchKind(delta: number): void {
+		kindIndex = (kindIndex + delta + KINDS.length) % KINDS.length;
+		selected = 0;
+		callbacks.requestRender();
+	}
+
+	function cycleSelected(): void {
 		const scope = activeScope();
 		if (!scope.available) {
 			deps.notify(`pi-switch: ${scope.reason ?? "the project scope is unavailable"}`, "warning");
 			return;
 		}
 		const row = selectedRow();
-		if (row === undefined || row.type === "section") return;
-		if (row.type === "package") togglePackage(scope.name, row.name);
-		else deps.toggle(scope.name, [itemTarget(row.item)], itemDisabled(deps.resolved(), row.item));
+		if (row === undefined) return;
+		const changes = row.type === "package" ? packageChanges(row.name, scope.name) : [itemChange(row.item, scope.name)];
+		deps.apply(scope.name, changes);
+		notifyIfBlocked(scope.name, changes);
 		refresh();
 	}
 
-	function togglePackage(scope: ScopeName, name: string): void {
-		const catalog = deps.catalog();
-		const enabled = packageState(catalog, deps.resolved(), name) !== "on";
-		// An MCP server can own dozens of tools; its row writes only the group key.
-		if (catalog.packages.find((entry) => entry.name === name)?.kind === "mcp") {
-			deps.toggle(scope, [{ kind: "packages", name }], enabled);
-			return;
-		}
-		const targets: ToggleTarget[] = [{ kind: "packages", name }];
-		for (const item of catalog.items) {
-			if (item.packageName === name) targets.push(itemTarget(item));
-		}
-		deps.toggle(scope, targets, enabled);
+	function itemChange(item: CatalogItem, scope: ScopeName): SettingChange {
+		const target = itemTarget(item);
+		return { target, setting: nextSetting(deps.valueOf(scope, target)) };
+	}
+
+	/**
+	 * A package row owns its children: its setting replaces every child entry in this
+	 * scope. Otherwise a child entry left over from before would keep overriding it.
+	 */
+	function packageChanges(name: string, scope: ScopeName): SettingChange[] {
+		const packageTarget: ToggleTarget = { kind: "packages", name };
+		const setting = nextSetting(deps.valueOf(scope, packageTarget));
+		const children = packageChildren(deps.catalog(), name).map((target) => ({ target, setting: "inherit" as const }));
+		return [{ target: packageTarget, setting }, ...children];
+	}
+
+	/** Global `on` cannot beat a project `off`; say so instead of leaving the user guessing. */
+	function notifyIfBlocked(scope: ScopeName, changes: readonly SettingChange[]): void {
+		if (scope !== "user") return;
+		const [first] = changes;
+		if (first === undefined || first.setting !== "on") return;
+		if (isOn(deps.resolved(), first.target, deps.defaultOn)) return;
+		deps.notify(
+			`pi-switch: enabled globally, but the project config keeps ${first.target.name} disabled here`,
+			"warning",
+		);
 	}
 
 	function editFilter(next: string): void {
@@ -180,14 +213,16 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 		{ key: Key.escape, run: handleEscape },
 		{ key: Key.ctrl("c"), run: handleEscape },
 		{ key: Key.tab, run: switchScope },
+		{ key: Key.left, run: () => switchKind(-1) },
+		{ key: Key.right, run: () => switchKind(1) },
 		{ key: Key.up, run: () => move(-1) },
 		{ key: Key.down, run: () => move(1) },
 		{ key: Key.pageUp, run: () => movePage(-1) },
 		{ key: Key.pageDown, run: () => movePage(1) },
 		{ key: Key.home, run: () => moveTo(0) },
-		{ key: Key.end, run: () => moveTo(view().selectable.length - 1) },
-		{ key: Key.space, run: toggleSelected },
-		{ key: Key.enter, run: toggleSelected },
+		{ key: Key.end, run: () => moveTo(view().rows.length - 1) },
+		{ key: Key.space, run: cycleSelected },
+		{ key: Key.enter, run: cycleSelected },
 		{ key: Key.backspace, run: deleteFilterChar },
 		{ key: Key.delete, run: deleteFilterChar },
 		{ key: Key.ctrl("u"), run: clearFilter },
@@ -232,6 +267,14 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 		return truncateToWidth(`${theme.bold("pi-switch")}  ${tabs}${suffix}`, width);
 	}
 
+	function kindLine(width: number): string {
+		const tabs = KINDS.map((kind, index) => {
+			const label = KIND_LABELS[kind];
+			return index === kindIndex ? theme.bold(theme.fg("accent", `[${label}]`)) : theme.fg("muted", label);
+		}).join(" ");
+		return truncateToWidth(tabs, width);
+	}
+
 	function filterLine(width: number): string {
 		const prompt = theme.fg("muted", "filter: ");
 		if (filter === "") return truncateToWidth(`${prompt}${theme.fg("dim", "type to search")}`, width);
@@ -240,11 +283,12 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 
 	function listLines(width: number): string[] {
 		const current = view();
-		const anchor = current.selectable[selected] ?? 0;
+		const anchor = Math.min(selected, Math.max(0, current.rows.length - 1));
 		const start = Math.max(
 			0,
 			Math.min(anchor - Math.floor(MAX_VISIBLE_ROWS / 2), current.rows.length - MAX_VISIBLE_ROWS),
 		);
+		if (current.rows.length === 0) return [theme.fg("dim", "  nothing here")];
 		return current.rows
 			.slice(start, start + MAX_VISIBLE_ROWS)
 			.map((row, index) => renderRow(row, start + index === anchor, width));
@@ -252,7 +296,6 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 
 	function renderRow(row: Row, isSelected: boolean, width: number): string {
 		const marker = isSelected ? theme.fg("accent", "❯ ") : "  ";
-		if (row.type === "section") return truncateToWidth(`${marker}${theme.bold(theme.fg("muted", row.label))}`, width);
 		if (row.type === "package") return packageLine(marker, row.name, width);
 		return itemLine(marker, row.item, width);
 	}
@@ -260,7 +303,7 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 	function packageLine(marker: string, name: string, width: number): string {
 		const catalog = deps.catalog();
 		const entry = catalog.packages.find((candidate) => candidate.name === name);
-		const state = packageState(catalog, deps.resolved(), name);
+		const state = packageState(catalog, deps.resolved(), name, deps.defaultOn);
 		const counts =
 			entry === undefined
 				? ""
@@ -281,7 +324,7 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 		const suffix = item.packageName === undefined ? "" : `  ${theme.fg("muted", item.packageName)}`;
 		const text = singleLine(item.description);
 		const description = text === "" ? "" : `  ${theme.fg("dim", text)}`;
-		const state = itemDisabled(deps.resolved(), item) ? "off" : "on";
+		const state = itemOn(deps.resolved(), item, deps.defaultOn) ? "on" : "off";
 		return truncateToWidth(
 			`${marker}${stateGlyph(state)} ${item.name}${suffix}${badges(itemTarget(item))}${description}`,
 			width,
@@ -289,10 +332,9 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 	}
 
 	function badgeFor(scope: ScopeInfo, target: ToggleTarget): string | undefined {
-		const state = deps.layerState(scope.name, target);
-		if (state === "unset") return undefined;
-		const on = state === "enabled";
-		return theme.fg(on ? "success" : "error", `${SCOPE_INITIALS[scope.name]}:${on ? "on" : "off"}`);
+		const setting = deps.valueOf(scope.name, target);
+		if (setting === "inherit") return undefined;
+		return theme.fg(setting === "on" ? "success" : "error", `${SCOPE_INITIALS[scope.name]}:${setting}`);
 	}
 
 	function badges(target: ToggleTarget): string {
@@ -303,11 +345,14 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 	function footer(width: number): string {
 		const catalog = deps.catalog();
 		const resolved = deps.resolved();
-		const enabled = (kind: "tool" | "skill") =>
-			catalog.items.filter((item) => item.kind === kind && !itemDisabled(resolved, item)).length;
-		const counts = `${enabled("tool")}/${catalog.items.filter((item) => item.kind === "tool").length} tools · ${enabled("skill")}/${catalog.items.filter((item) => item.kind === "skill").length} skills`;
+		const count = (kind: "tool" | "skill") => {
+			const items = catalog.items.filter((item) => item.kind === kind);
+			const on = items.filter((item) => itemOn(resolved, item, deps.defaultOn)).length;
+			return `${on}/${items.length}`;
+		};
+		const counts = `${count("tool")} tools · ${count("skill")} skills`;
 		return truncateToWidth(
-			`${theme.fg("dim", "space toggle · tab scope · esc close")}  ${theme.fg("muted", counts)}`,
+			`${theme.fg("dim", "space cycle · ←→ kind · tab scope · esc close")}  ${theme.fg("muted", counts)}`,
 			width,
 		);
 	}
@@ -320,11 +365,18 @@ function createScopePicker(theme: PickerTheme, deps: ScopePickerDeps, callbacks:
 
 	return {
 		render(width: number): string[] {
-			return [header(width), filterLine(width), ...listLines(width), footer(width)];
+			return [header(width), kindLine(width), filterLine(width), ...listLines(width), footer(width)];
 		},
 		handleInput,
 		invalidate(): void {},
 	};
+}
+
+/** The catalog item kind a picker tab lists. */
+function itemKindOf(kind: Kind): CatalogItem["kind"] {
+	if (kind === "skills") return "skill";
+	if (kind === "sections") return "section";
+	return "tool";
 }
 
 export async function runScopePicker(ctx: ExtensionCommandContext, deps: ScopePickerDeps): Promise<void> {

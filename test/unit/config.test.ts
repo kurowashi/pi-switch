@@ -1,9 +1,11 @@
 /**
- * Unit: configuration parsing, effective resolution, and persistence.
+ * Unit: configuration parsing, resolution, and persistence (format version 2).
  *
- * The rules under test are the user-facing contract in README.md#設定:
- * unlisted targets stay enabled, each layer can override the previous one,
- * and a malformed file is ignored without ever being overwritten.
+ * The rules under test are the user-facing contract in README.md#設定: each
+ * file holds one value per target, the project file wins over the user file,
+ * an item's own entry wins over its package's entry in the same file, and a
+ * target no file sets has no value. A malformed file is ignored without ever
+ * being overwritten.
  */
 
 import assert from "node:assert/strict";
@@ -14,19 +16,18 @@ import test from "node:test";
 import {
 	CONFIG_FILE_NAME,
 	emptyConfig,
-	layerState,
 	parseConfig,
 	projectConfigPath,
 	readConfigFile,
 	resolveConfig,
 	type ScopeConfig,
 	serializeConfig,
-	setDisabled,
-	setEnabled,
-	toggleInScope,
+	setValue,
 	userConfigPath,
+	valueIn,
 	writeConfigFile,
 } from "../../src/config.ts";
+import type { ToggleTarget } from "../../src/model.ts";
 
 function sandbox(): string {
 	return mkdtempSync(join(tmpdir(), "pi-switch-config-"));
@@ -38,84 +39,63 @@ function config(source: string): ScopeConfig {
 	return parsed.config;
 }
 
-test("an empty object is a valid config with version 1", () => {
+/** The value a target resolves to, with `undefined` meaning no file sets it. */
+function valueAt(user: ScopeConfig, project: ScopeConfig | undefined, target: ToggleTarget) {
+	return resolveConfig(user, project).resolve(target).value;
+}
+
+test("an empty object is a valid version 2 config", () => {
 	const parsed = parseConfig("{}");
 	assert.ok(parsed.ok);
-	assert.equal(parsed.config.version, 1);
-	assert.deepEqual(parsed.config.disabled, { tools: [], skills: [], packages: [], sections: [] });
-	assert.deepEqual(parsed.config.enabled, { tools: [], skills: [], packages: [], sections: [] });
+	assert.equal(parsed.config.version, 2);
+	assert.deepEqual(parsed.config.values, { tools: {}, skills: {}, packages: {}, sections: {} });
 	assert.deepEqual(parsed.config.extra, {});
 });
 
-test("lists are deduplicated and sorted", () => {
-	const parsed = parseConfig('{"disabled":{"tools":["b","a","b"]}}');
+test("values parse as on and off per kind, and anything else is rejected", () => {
+	const parsed = parseConfig('{"version":2,"tools":{"b":"off","a":"on"},"packages":{"npm:pkg":"off"}}');
 	assert.ok(parsed.ok);
-	assert.deepEqual(parsed.config.disabled.tools, ["a", "b"]);
+	assert.deepEqual(parsed.config.values.tools, { b: "off", a: "on" });
+	assert.deepEqual(parsed.config.values.packages, { "npm:pkg": "off" });
+
+	assert.equal(parseConfig('{"version":2,"tools":{"a":true}}').ok, false);
+	assert.equal(parseConfig('{"version":2,"tools":{"a":"inherit"}}').ok, false, "inherit is the absence of an entry");
+	assert.equal(parseConfig('{"version":2,"tools":{"":"off"}}').ok, false);
+	assert.equal(parseConfig('{"version":2,"tools":["a"]}').ok, false);
+	assert.equal(parseConfig('{"version":2,"tools":"a"}').ok, false);
+	assert.equal(parseConfig("not json").ok, false);
+	assert.equal(parseConfig("[]").ok, false);
+	assert.equal(parseConfig('{"version":"two"}').ok, false);
+	assert.equal(parseConfig('{"version":3}').ok, false);
+});
+
+test("sections are a top-level kind with the same value form", () => {
+	const parsed = parseConfig('{"version":2,"sections":{"docs":"off","rules":"on"}}');
+	assert.ok(parsed.ok);
+	assert.deepEqual(parsed.config.values.sections, { docs: "off", rules: "on" });
+	assert.equal(
+		parseConfig('{"version":2,"disabled":{"sections":{"docs":"off"}}}').ok,
+		true,
+		"unknown keys are kept as extra",
+	);
+	assert.equal(parseConfig('{"version":2,"sections":["docs"]}').ok, false);
 });
 
 test("unknown top-level fields survive a write", () => {
-	const parsed = parseConfig('{"version":1,"note":"keep me","disabled":{"tools":["a"]}}');
+	const parsed = parseConfig('{"version":2,"note":"keep me","tools":{"a":"off"}}');
 	assert.ok(parsed.ok);
 	assert.deepEqual(parsed.config.extra, { note: "keep me" });
 	const serialized = JSON.parse(serializeConfig(parsed.config)) as Record<string, unknown>;
 	assert.equal(serialized["note"], "keep me");
-	assert.deepEqual(serialized["disabled"], { tools: ["a"] });
-	assert.equal(serialized["enabled"], undefined);
+	assert.deepEqual(serialized["tools"], { a: "off" });
+	assert.equal(serialized["skills"], undefined, "empty kinds are not written");
 });
 
-test("invalid configs are rejected with a reason", () => {
-	assert.equal(parseConfig("not json").ok, false);
-	assert.equal(parseConfig("[]").ok, false);
-	assert.equal(parseConfig('{"version":"one"}').ok, false);
-	assert.equal(parseConfig('{"version":2}').ok, false);
-	assert.equal(parseConfig('{"disabled":[]}').ok, false);
-	assert.equal(parseConfig('{"disabled":{"tools":"a"}}').ok, false);
-	assert.equal(parseConfig('{"disabled":{"tools":[1]}}').ok, false);
-	assert.equal(parseConfig('{"disabled":{"tols":[]}}').ok, false);
-	assert.equal(parseConfig('{"disabled":{"tools":[""]}}').ok, false);
-	assert.equal(parseConfig('{"disabled":{"sections":["docs"]}}').ok, false, "sections belong at the top level");
-	assert.equal(parseConfig('{"enabled":{"nope":[]}}').ok, false);
-	assert.equal(parseConfig('{"sections":[]}').ok, false);
-	assert.equal(parseConfig('{"sections":{"disabled":"docs"}}').ok, false);
-	assert.equal(parseConfig('{"sections":{"unknown":[]}}').ok, false);
-});
-
-test("prompt sections live in the top-level sections key", () => {
-	const parsed = parseConfig('{"sections":{"disabled":["docs","b","a","docs"],"enabled":["rules"]}}');
-	assert.ok(parsed.ok);
-	assert.deepEqual(parsed.config.disabled.sections, ["a", "b", "docs"]);
-	assert.deepEqual(parsed.config.enabled.sections, ["rules"]);
-	const serialized = JSON.parse(serializeConfig(parsed.config)) as Record<string, unknown>;
-	assert.deepEqual(serialized["sections"], { disabled: ["a", "b", "docs"], enabled: ["rules"] });
-	assert.equal(serialized["disabled"], undefined, "sections must not leak into the disabled map");
-	assert.equal(serialized["enabled"], undefined);
-});
-
-test("a file without a sections key stays valid (older versions)", () => {
-	const parsed = parseConfig('{"version":1,"disabled":{"tools":["a"]}}');
-	assert.ok(parsed.ok);
-	assert.deepEqual(parsed.config.disabled.sections, []);
-	assert.deepEqual(parsed.config.enabled.sections, []);
-});
-
-test("sections round-trip through the file and the unknown fields survive", () => {
-	const directory = sandbox();
-	try {
-		const file = readConfigFile(join(directory, CONFIG_FILE_NAME));
-		setDisabled(file.config, "sections", "docs", true);
-		file.config.extra["note"] = "keep me";
-		writeConfigFile(file);
-
-		const serialized = JSON.parse(readFileSync(file.path, "utf8")) as Record<string, unknown>;
-		assert.deepEqual(serialized["sections"], { disabled: ["docs"] });
-		assert.equal(serialized["note"], "keep me");
-
-		const reread = readConfigFile(file.path);
-		assert.equal(reread.malformed, false);
-		assert.deepEqual(reread.config.disabled.sections, ["docs"]);
-	} finally {
-		rmSync(directory, { recursive: true, force: true });
-	}
+test("serialization writes the version and sorted names", () => {
+	const user = emptyConfig();
+	setValue(user, { kind: "tools", name: "b" }, "off");
+	setValue(user, { kind: "tools", name: "a" }, "on");
+	assert.equal(serializeConfig(user), '{\n  "version": 2,\n  "tools": {\n    "a": "on",\n    "b": "off"\n  }\n}\n');
 });
 
 test("a missing file is empty and a broken file is malformed", () => {
@@ -145,11 +125,11 @@ test("writeConfigFile creates the directory, replaces the file atomically, and r
 	const directory = sandbox();
 	try {
 		const file = readConfigFile(join(directory, ".pi", CONFIG_FILE_NAME));
-		setDisabled(file.config, "tools", "exa_request", true);
+		setValue(file.config, { kind: "tools", name: "exa_request" }, "off");
 		writeConfigFile(file);
 		const first = statSync(file.path).ino;
 
-		setDisabled(file.config, "skills", "pdf", true);
+		setValue(file.config, { kind: "skills", name: "pdf" }, "on");
 		writeConfigFile(file);
 		// rename(2) replaces the inode; a direct overwrite would keep it.
 		assert.notEqual(statSync(file.path).ino, first, "the write must replace the file through rename");
@@ -161,7 +141,8 @@ test("writeConfigFile creates the directory, replaces the file atomically, and r
 
 		const reread = readConfigFile(file.path);
 		assert.equal(reread.malformed, false);
-		assert.deepEqual(reread.config.disabled, { tools: ["exa_request"], skills: ["pdf"], packages: [], sections: [] });
+		assert.deepEqual(reread.config.values.tools, { exa_request: "off" });
+		assert.deepEqual(reread.config.values.skills, { pdf: "on" });
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}
@@ -172,90 +153,70 @@ test("configuration paths are the documented ones", () => {
 	assert.equal(projectConfigPath("/work/repo"), join("/work/repo", ".pi", CONFIG_FILE_NAME));
 });
 
-test("unlisted targets stay enabled and each layer can override the previous", () => {
-	const user = config('{"disabled":{"tools":["a"],"packages":["npm:pkg"]}}');
-	const project = config('{"enabled":{"tools":["a"],"packages":["npm:pkg"]}}');
-	assert.equal(resolveConfig(emptyConfig(), undefined).isDisabled({ kind: "tools", name: "a" }), false);
-	assert.equal(resolveConfig(user, undefined).isDisabled({ kind: "tools", name: "a" }), true);
-	assert.equal(resolveConfig(user, undefined).isDisabled({ kind: "tools", name: "b" }), false);
-	assert.equal(resolveConfig(user, undefined).isDisabled({ kind: "skills", name: "s" }), false);
-	assert.equal(resolveConfig(emptyConfig(), project).isDisabled({ kind: "tools", name: "a" }), false);
-	assert.equal(resolveConfig(user, project).isDisabled({ kind: "tools", name: "a" }), false);
-	assert.equal(resolveConfig(user, undefined).isDisabled({ kind: "skills", name: "s", packageName: "npm:pkg" }), true);
-	assert.equal(resolveConfig(user, project).isDisabled({ kind: "skills", name: "s", packageName: "npm:pkg" }), false);
-	assert.equal(resolveConfig(user, project).isDisabled({ kind: "packages", name: "npm:pkg" }), false);
+test("a target no file sets has no value, so the caller's default applies", () => {
+	const user = config('{"version":2,"tools":{"a":"off"}}');
+	assert.equal(valueAt(emptyConfig(), undefined, { kind: "tools", name: "a" }), undefined);
+	assert.equal(valueAt(user, undefined, { kind: "tools", name: "a" }), "off");
+	assert.equal(valueAt(user, undefined, { kind: "tools", name: "b" }), undefined);
 });
 
-test("sections resolve through the same layers as other targets", () => {
-	const user = config('{"sections":{"disabled":["docs"]}}');
-	const project = config('{"sections":{"enabled":["docs"]}}');
-	assert.equal(resolveConfig(user, undefined).isDisabled({ kind: "sections", name: "docs" }), true);
-	assert.equal(resolveConfig(user, undefined).isDisabled({ kind: "sections", name: "rules" }), false);
-	assert.equal(resolveConfig(user, project).isDisabled({ kind: "sections", name: "docs" }), false);
+test("the project file wins over the user file whenever it sets the target", () => {
+	const user = config('{"version":2,"tools":{"a":"off"},"skills":{"s":"on"}}');
+	const project = config('{"version":2,"tools":{"a":"on"},"skills":{"s":"off"}}');
+	assert.equal(valueAt(user, project, { kind: "tools", name: "a" }), "on");
+	assert.equal(valueAt(user, project, { kind: "skills", name: "s" }), "off");
+	assert.equal(valueAt(user, emptyConfig(), { kind: "tools", name: "a" }), "off", "an empty project inherits");
 });
 
-test("an enable override inside one layer beats that layer's package disable", () => {
-	const user = config('{"disabled":{"packages":["npm:pkg"],"tools":["b"]},"enabled":{"tools":["a"]}}');
-	const resolved = resolveConfig(user, undefined);
-	assert.equal(resolved.isDisabled({ kind: "tools", name: "a", packageName: "npm:pkg" }), false);
-	assert.equal(resolved.isDisabled({ kind: "tools", name: "b", packageName: "npm:pkg" }), true);
-	assert.equal(resolved.isDisabled({ kind: "tools", name: "c", packageName: "npm:pkg" }), true);
+test("a project entry beats the user's package, and the project's package beats the user's entry", () => {
+	const user = config('{"version":2,"packages":{"npm:pkg":"off"}}');
+	const project = config('{"version":2,"tools":{"x":"on"}}');
+	const target: ToggleTarget = { kind: "tools", name: "x", packageName: "npm:pkg" };
+	assert.equal(valueAt(user, project, target), "on", "the project's own entry wins over the user's package");
+	assert.equal(valueAt(user, emptyConfig(), target), "off", "the user's package applies when nothing closer sets it");
+
+	const userItem = config('{"version":2,"tools":{"x":"on"}}');
+	const projectPackage = config('{"version":2,"packages":{"npm:pkg":"off"}}');
+	assert.equal(valueAt(userItem, projectPackage, target), "off", "project wins even over the user's own entry");
 });
 
-test("setDisabled and setEnabled keep a stable sorted list", () => {
-	const user = emptyConfig();
-	setDisabled(user, "skills", "b", true);
-	setDisabled(user, "skills", "a", true);
-	setDisabled(user, "skills", "b", false);
-	setEnabled(user, "skills", "z", true);
-	assert.deepEqual(user.disabled.skills, ["a"]);
-	assert.deepEqual(user.enabled.skills, ["z"]);
+test("inside one file an item's entry beats its package's entry", () => {
+	const user = config('{"version":2,"packages":{"npm:pkg":"off"},"tools":{"a":"on"}}');
+	assert.equal(valueAt(user, undefined, { kind: "tools", name: "a", packageName: "npm:pkg" }), "on");
+	assert.equal(valueAt(user, undefined, { kind: "tools", name: "b", packageName: "npm:pkg" }), "off");
 });
 
-test("toggling off records a disable in the edited scope", () => {
-	const user = emptyConfig();
-	toggleInScope(user, undefined, "user", { kind: "tools", name: "a" }, false);
-	assert.deepEqual(user.disabled.tools, ["a"]);
-	assert.deepEqual(user.enabled.tools, []);
-});
-
-test("toggling on clears the disable and needs no override when nothing else disables it", () => {
-	const user = config('{"disabled":{"tools":["a"]},"enabled":{"tools":["a"]}}');
-	toggleInScope(user, undefined, "user", { kind: "tools", name: "a" }, true);
-	assert.deepEqual(user.disabled.tools, []);
-	assert.deepEqual(user.enabled.tools, []);
-});
-
-test("a project enable overrides a user disable, and a project disable records its own entry", () => {
-	const user = config('{"disabled":{"tools":["a","b"]}}');
-	const project = emptyConfig();
-	toggleInScope(user, project, "project", { kind: "tools", name: "a" }, true);
-	toggleInScope(user, project, "project", { kind: "tools", name: "b" }, false);
-	assert.deepEqual(project.enabled.tools, ["a"]);
-	assert.deepEqual(project.disabled.tools, ["b"]);
+test("resolution reports the scope and the entry that decided", () => {
+	const user = config('{"version":2,"packages":{"npm:pkg":"off"}}');
+	const project = config('{"version":2,"tools":{"a":"on"}}');
 	const resolved = resolveConfig(user, project);
-	assert.equal(resolved.isDisabled({ kind: "tools", name: "a" }), false);
-	assert.equal(resolved.isDisabled({ kind: "tools", name: "b" }), true);
+	assert.deepEqual(resolved.resolve({ kind: "tools", name: "a", packageName: "npm:pkg" }), {
+		value: "on",
+		scope: "project",
+		via: "entry",
+	});
+	assert.deepEqual(resolved.resolve({ kind: "tools", name: "b", packageName: "npm:pkg" }), {
+		value: "off",
+		scope: "user",
+		via: "package",
+	});
+	assert.deepEqual(resolved.resolve({ kind: "tools", name: "c" }), {});
 });
 
-test("an item can be enabled inside a disabled package in the same scope", () => {
-	const user = config('{"disabled":{"packages":["npm:pkg"]}}');
-	toggleInScope(user, undefined, "user", { kind: "tools", name: "a", packageName: "npm:pkg" }, true);
-	assert.deepEqual(user.enabled.tools, ["a"]);
-	assert.equal(resolveConfig(user, undefined).isDisabled({ kind: "tools", name: "a", packageName: "npm:pkg" }), false);
+test("valueIn reads only the file's own entry", () => {
+	const user = config('{"version":2,"packages":{"npm:pkg":"off"},"tools":{"a":"on"}}');
+	assert.equal(valueIn(user, { kind: "tools", name: "a", packageName: "npm:pkg" }), "on");
+	assert.equal(valueIn(user, { kind: "tools", name: "b", packageName: "npm:pkg" }), "inherit");
+	assert.equal(valueIn(undefined, { kind: "tools", name: "a" }), "inherit");
 });
 
-test("toggling in the project scope without a project file fails loudly", () => {
-	assert.throws(
-		() => toggleInScope(emptyConfig(), undefined, "project", { kind: "tools", name: "a" }, true),
-		/project scope is unavailable/,
-	);
-});
-
-test("layerState reports only direct entries in that file", () => {
-	const user = config('{"disabled":{"tools":["a"]},"enabled":{"skills":["s"]}}');
-	assert.equal(layerState(user, { kind: "tools", name: "a" }), "disabled");
-	assert.equal(layerState(user, { kind: "skills", name: "s" }), "enabled");
-	assert.equal(layerState(user, { kind: "tools", name: "b" }), "unset");
-	assert.equal(layerState(undefined, { kind: "tools", name: "a" }), "unset");
+test("setValue writes on, writes off, and removes the entry on inherit", () => {
+	const user = emptyConfig();
+	const target: ToggleTarget = { kind: "skills", name: "pdf" };
+	setValue(user, target, "off");
+	assert.deepEqual(user.values.skills, { pdf: "off" });
+	setValue(user, target, "on");
+	assert.deepEqual(user.values.skills, { pdf: "on" });
+	setValue(user, target, "inherit");
+	assert.deepEqual(user.values.skills, {});
 });
